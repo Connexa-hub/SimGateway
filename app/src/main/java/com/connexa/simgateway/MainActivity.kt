@@ -1,6 +1,7 @@
 package com.connexa.simgateway
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.widget.TextView
 
@@ -16,5 +17,8 @@ class MainActivity : Activity() {
         }
 
         setContentView(textView)
+
+        val serviceIntent = Intent(this, GatewayService::class.java)
+        startForegroundService(serviceIntent)
     }
 }
