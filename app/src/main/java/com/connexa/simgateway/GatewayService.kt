@@ -22,6 +22,7 @@ class GatewayService : Service() {
 
     private var serverSocket: ServerSocket? = null
     private var serverThread: Thread? = null
+    private var heartbeatThread: Thread? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -34,6 +35,7 @@ class GatewayService : Service() {
         )
 
         startTcpServer()
+        startHeartbeat()
     }
 
     private fun startTcpServer() {
@@ -166,9 +168,39 @@ class GatewayService : Service() {
         }
     }
 
+    private fun startHeartbeat() {
+
+        heartbeatThread = thread(
+            start = true,
+            name = "SimGatewayHeartbeat"
+        ) {
+
+            var count = 0
+
+            while (!Thread.currentThread().isInterrupted) {
+
+                try {
+
+                    count++
+
+                    updateNotification(
+                        "Service alive • heartbeat $count"
+                    )
+
+                    Thread.sleep(3000)
+
+                } catch (e: InterruptedException) {
+
+                    break
+                }
+            }
+        }
+    }
+
     override fun onDestroy() {
 
         serverThread?.interrupt()
+        heartbeatThread?.interrupt()
 
         try {
             serverSocket?.close()
