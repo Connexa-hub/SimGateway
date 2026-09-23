@@ -8,7 +8,6 @@ import android.content.Intent
 import android.os.IBinder
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
 import kotlin.concurrent.thread
@@ -28,8 +27,6 @@ class GatewayService : Service() {
         super.onCreate()
 
         createNotificationChannel()
-
-        updateNotification("Starting gateway...")
 
         startForeground(
             NOTIFICATION_ID,
@@ -84,78 +81,79 @@ class GatewayService : Service() {
         }
     }
 
-private fun handleClient(client: Socket) {
+    private fun handleClient(client: Socket) {
 
-    client.use { socket ->
+        client.use { socket ->
 
-        try {
+            try {
 
-            updateNotification(
-                "Handling client: ${socket.inetAddress.hostAddress}"
-            )
-
-            val output = socket.getOutputStream()
-
-            val reader = BufferedReader(
-                InputStreamReader(
-                    socket.getInputStream()
+                updateNotification(
+                    "Handling client: ${socket.inetAddress.hostAddress}"
                 )
-            )
 
-            updateNotification("Sending raw greeting...")
+                val output = socket.getOutputStream()
 
-            val greeting =
-                "HELLO FROM PHONE A\n".toByteArray()
+                val reader = BufferedReader(
+                    InputStreamReader(
+                        socket.getInputStream()
+                    )
+                )
 
-            output.write(greeting)
-            output.flush()
+                updateNotification(
+                    "Sending raw greeting..."
+                )
 
-            updateNotification("Raw greeting sent")
+                val greeting =
+                    "HELLO FROM PHONE A\n".toByteArray()
 
-            socket.shutdownOutput()
+                output.write(greeting)
+                output.flush()
 
-            updateNotification("Output shutdown")
+                updateNotification(
+                    "Raw greeting sent"
+                )
 
-            while (true) {
+                socket.shutdownOutput()
 
-                val message = reader.readLine()
-                    ?: break
+                updateNotification(
+                    "Output shutdown"
+                )
 
-                when (message.trim().uppercase()) {
+                while (true) {
 
-                    "STATUS" -> {
-                        output.write(
-                            "SIM GATEWAY ONLINE\n".toByteArray()
-                        )
-                        output.flush()
-                    }
+                    val message = reader.readLine()
+                        ?: break
 
-                    "PING" -> {
-                        output.write(
-                            "PONG\n".toByteArray()
-                        )
-                        output.flush()
-                    }
+                    when (message.trim().uppercase()) {
 
-                    else -> {
-                        output.write(
-                            "UNKNOWN COMMAND: $message\n".toByteArray()
-                        )
-                        output.flush()
+                        "STATUS" -> {
+
+                            output.write(
+                                "SIM GATEWAY ONLINE\n".toByteArray()
+                            )
+
+                            output.flush()
+                        }
+
+                        "PING" -> {
+
+                            output.write(
+                                "PONG\n".toByteArray()
+                            )
+
+                            output.flush()
+                        }
+
+                        else -> {
+
+                            output.write(
+                                "UNKNOWN COMMAND: $message\n".toByteArray()
+                            )
+
+                            output.flush()
+                        }
                     }
                 }
-            }
-
-        } catch (e: Exception) {
-
-            updateNotification(
-                "Client error: ${e.javaClass.simpleName}"
-            )
-
-            e.printStackTrace()
-        }
-    }
-}
 
             } catch (e: Exception) {
 
@@ -187,6 +185,7 @@ private fun handleClient(client: Socket) {
         flags: Int,
         startId: Int
     ): Int {
+
         return START_STICKY
     }
 
@@ -208,9 +207,14 @@ private fun handleClient(client: Socket) {
         manager.createNotificationChannel(channel)
     }
 
-    private fun createNotification(text: String): Notification {
+    private fun createNotification(
+        text: String
+    ): Notification {
 
-        return Notification.Builder(this, CHANNEL_ID)
+        return Notification.Builder(
+            this,
+            CHANNEL_ID
+        )
             .setContentTitle("SIM Gateway")
             .setContentText(text)
             .setSmallIcon(
@@ -220,7 +224,9 @@ private fun handleClient(client: Socket) {
             .build()
     }
 
-    private fun updateNotification(text: String) {
+    private fun updateNotification(
+        text: String
+    ) {
 
         val manager =
             getSystemService(NotificationManager::class.java)
