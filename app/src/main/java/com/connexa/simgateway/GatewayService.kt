@@ -84,61 +84,78 @@ class GatewayService : Service() {
         }
     }
 
-    private fun handleClient(client: Socket) {
+private fun handleClient(client: Socket) {
 
-        client.use { socket ->
+    client.use { socket ->
 
-            try {
+        try {
 
-                updateNotification(
-                    "Handling client: ${socket.inetAddress.hostAddress}"
+            updateNotification(
+                "Handling client: ${socket.inetAddress.hostAddress}"
+            )
+
+            val output = socket.getOutputStream()
+
+            val reader = BufferedReader(
+                InputStreamReader(
+                    socket.getInputStream()
                 )
+            )
 
-                val writer = PrintWriter(
-                    socket.getOutputStream(),
-                    true
-                )
+            updateNotification("Sending raw greeting...")
 
-                val reader = BufferedReader(
-                    InputStreamReader(
-                        socket.getInputStream()
-                    )
-                )
+            val greeting =
+                "HELLO FROM PHONE A\n".toByteArray()
 
-                updateNotification("Sending greeting...")
+            output.write(greeting)
+            output.flush()
 
-                writer.println("HELLO FROM PHONE A")
-                writer.flush()
+            updateNotification("Raw greeting sent")
 
-                updateNotification("Greeting sent")
+            socket.shutdownOutput()
 
-                while (true) {
+            updateNotification("Output shutdown")
 
-                    val message = reader.readLine()
-                        ?: break
+            while (true) {
 
-                    when (message.trim().uppercase()) {
+                val message = reader.readLine()
+                    ?: break
 
-                        "STATUS" -> {
-                            writer.println(
-                                "SIM GATEWAY ONLINE"
-                            )
-                            writer.flush()
-                        }
+                when (message.trim().uppercase()) {
 
-                        "PING" -> {
-                            writer.println("PONG")
-                            writer.flush()
-                        }
+                    "STATUS" -> {
+                        output.write(
+                            "SIM GATEWAY ONLINE\n".toByteArray()
+                        )
+                        output.flush()
+                    }
 
-                        else -> {
-                            writer.println(
-                                "UNKNOWN COMMAND: $message"
-                            )
-                            writer.flush()
-                        }
+                    "PING" -> {
+                        output.write(
+                            "PONG\n".toByteArray()
+                        )
+                        output.flush()
+                    }
+
+                    else -> {
+                        output.write(
+                            "UNKNOWN COMMAND: $message\n".toByteArray()
+                        )
+                        output.flush()
                     }
                 }
+            }
+
+        } catch (e: Exception) {
+
+            updateNotification(
+                "Client error: ${e.javaClass.simpleName}"
+            )
+
+            e.printStackTrace()
+        }
+    }
+}
 
             } catch (e: Exception) {
 
