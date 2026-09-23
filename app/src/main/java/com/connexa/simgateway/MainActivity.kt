@@ -11,14 +11,22 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val textView = TextView(this).apply {
-            text = "SIM Gateway\n\nPhone A gateway app is running."
+            text = "SIM Gateway\n\nStarting gateway service..."
             textSize = 22f
             setPadding(40, 80, 40, 40)
         }
 
         setContentView(textView)
 
-        val serviceIntent = Intent(this, GatewayService::class.java)
-        startForegroundService(serviceIntent)
+        try {
+            val serviceIntent = Intent(this, GatewayService::class.java)
+            startForegroundService(serviceIntent)
+
+            textView.text =
+                "SIM Gateway\n\nGateway service start requested."
+        } catch (e: Exception) {
+            textView.text =
+                "SIM Gateway\n\nSERVICE ERROR:\n${e.javaClass.name}\n\n${e.message}"
+        }
     }
 }
