@@ -29,14 +29,12 @@ class GatewayService : Service() {
 
         createNotificationChannel()
 
-        val notification = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("SIM Gateway")
-            .setContentText("Gateway listening on port $PORT")
-            .setSmallIcon(android.R.drawable.stat_sys_phone_call)
-            .setOngoing(true)
-            .build()
+        updateNotification("Starting gateway...")
 
-        startForeground(NOTIFICATION_ID, notification)
+        startForeground(
+            NOTIFICATION_ID,
+            createNotification("Starting gateway...")
+        )
 
         startTcpServer()
     }
@@ -49,13 +47,25 @@ class GatewayService : Service() {
         ) {
 
             try {
+
                 serverSocket = ServerSocket(PORT)
+
+                updateNotification(
+                    "Listening on port $PORT"
+                )
 
                 while (!Thread.currentThread().isInterrupted) {
 
                     val client = serverSocket!!.accept()
 
-                    thread {
+                    updateNotification(
+                        "Client connected: ${client.inetAddress.hostAddress}"
+                    )
+
+                    thread(
+                        start = true,
+                        name = "SimGatewayClient"
+                    ) {
                         handleClient(client)
                     }
                 }
@@ -63,6 +73,11 @@ class GatewayService : Service() {
             } catch (e: Exception) {
 
                 if (!Thread.currentThread().isInterrupted) {
+
+                    updateNotification(
+                        "Server error: ${e.javaClass.simpleName}"
+                    )
+
                     e.printStackTrace()
                 }
             }
@@ -74,6 +89,11 @@ class GatewayService : Service() {
         client.use { socket ->
 
             try {
+
+                updateNotification(
+                    "Handling client: ${socket.inetAddress.hostAddress}"
+                )
+
                 val writer = PrintWriter(
                     socket.getOutputStream(),
                     true
@@ -85,7 +105,12 @@ class GatewayService : Service() {
                     )
                 )
 
+                updateNotification("Sending greeting...")
+
                 writer.println("HELLO FROM PHONE A")
+                writer.flush()
+
+                updateNotification("Greeting sent")
 
                 while (true) {
 
@@ -95,22 +120,32 @@ class GatewayService : Service() {
                     when (message.trim().uppercase()) {
 
                         "STATUS" -> {
-                            writer.println("SIM GATEWAY ONLINE")
+                            writer.println(
+                                "SIM GATEWAY ONLINE"
+                            )
+                            writer.flush()
                         }
 
                         "PING" -> {
                             writer.println("PONG")
+                            writer.flush()
                         }
 
                         else -> {
                             writer.println(
                                 "UNKNOWN COMMAND: $message"
                             )
+                            writer.flush()
                         }
                     }
                 }
 
             } catch (e: Exception) {
+
+                updateNotification(
+                    "Client error: ${e.javaClass.simpleName}"
+                )
+
                 e.printStackTrace()
             }
         }
@@ -154,5 +189,28 @@ class GatewayService : Service() {
             getSystemService(NotificationManager::class.java)
 
         manager.createNotificationChannel(channel)
+    }
+
+    private fun createNotification(text: String): Notification {
+
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("SIM Gateway")
+            .setContentText(text)
+            .setSmallIcon(
+                android.R.drawable.stat_sys_phone_call
+            )
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+
+        val manager =
+            getSystemService(NotificationManager::class.java)
+
+        manager.notify(
+            NOTIFICATION_ID,
+            createNotification(text)
+        )
     }
 }
