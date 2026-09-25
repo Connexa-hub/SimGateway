@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.IBinder
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -18,11 +21,16 @@ class GatewayService : Service() {
         private const val CHANNEL_ID = "sim_gateway_channel"
         private const val NOTIFICATION_ID = 1001
         private const val PORT = 8765
+        private const val SERVICE_TYPE = "_simgateway._tcp."
+        private const val SERVICE_NAME = "SIM Gateway"
     }
 
     private var serverSocket: ServerSocket? = null
     private var serverThread: Thread? = null
     private var heartbeatThread: Thread? = null
+
+    private var nsdManager: NsdManager? = null
+    private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -33,6 +41,9 @@ class GatewayService : Service() {
             NOTIFICATION_ID,
             createNotification("Starting gateway...")
         )
+
+        nsdManager =
+            getSystemService(Context.NSD_SERVICE) as NsdManager
 
         startTcpServer()
         startHeartbeat()
@@ -52,6 +63,8 @@ class GatewayService : Service() {
                 updateNotification(
                     "Listening on port $PORT"
                 )
+
+                registerNsdService()
 
                 while (!Thread.currentThread().isInterrupted) {
 
@@ -83,6 +96,68 @@ class GatewayService : Service() {
         }
     }
 
+    private fun registerNsdService() {
+
+        val manager = nsdManager ?: return
+
+        val serviceInfo = NsdServiceInfo().apply {
+            serviceName = SERVICE_NAME
+            serviceType = SERVICE_TYPE
+            port = PORT
+        }
+
+        nsdRegistrationListener =
+            object : NsdManager.RegistrationListener {
+
+                override fun onServiceRegistered(
+                    serviceInfo: NsdServiceInfo
+                ) {
+
+                    updateNotification(
+                        "Gateway discoverable as ${serviceInfo.serviceName}"
+                    )
+                }
+
+                override fun onRegistrationFailed(
+                    serviceInfo: NsdServiceInfo,
+                    errorCode: Int
+                ) {
+
+                    updateNotification(
+                        "NSD registration failed: $errorCode"
+                    )
+                }
+
+                override fun onServiceUnregistered(
+                    serviceInfo: NsdServiceInfo
+                ) {
+                }
+
+                override fun onUnregistrationFailed(
+                    serviceInfo: NsdServiceInfo,
+                    errorCode: Int
+                ) {
+                }
+            }
+
+        try {
+
+            manager.registerService(
+                serviceInfo,
+                NsdManager.PROTOCOL_DNS_SD,
+                nsdRegistrationListener
+            )
+
+        } catch (e: Exception) {
+
+            updateNotification(
+                "NSD error: ${e.javaClass.simpleName}"
+            )
+
+            e.printStackTrace()
+        }
+    }
+
     private fun handleClient(client: Socket) {
 
         client.use { socket ->
@@ -101,7 +176,6 @@ class GatewayService : Service() {
                     )
                 )
 
-                // Initial greeting
                 output.write(
                     "HELLO FROM PHONE A\n".toByteArray()
                 )
@@ -112,13 +186,14 @@ class GatewayService : Service() {
                     "Client session active"
                 )
 
-                // Keep the connection alive and wait for commands.
                 while (true) {
 
-                    val message = reader.readLine()
-                        ?: break
+                    val message =
+                        reader.readLine()
+                            ?: break
 
-                    val command = message.trim().uppercase()
+                    val command =
+                        message.trim().uppercase()
 
                     when (command) {
 
@@ -171,7 +246,8 @@ class GatewayService : Service() {
                         else -> {
 
                             output.write(
-                                "UNKNOWN COMMAND: $message\n".toByteArray()
+                                "UNKNOWN COMMAND: $message\n"
+                                    .toByteArray()
                             )
 
                             output.flush()
@@ -225,8 +301,10 @@ class GatewayService : Service() {
 
     override fun onDestroy() {
 
-        serverThread?.interrupt()
         heartbeatThread?.interrupt()
+        serverThread?.interrupt()
+
+        unregisterNsdService()
 
         try {
             serverSocket?.close()
@@ -236,6 +314,22 @@ class GatewayService : Service() {
         serverSocket = null
 
         super.onDestroy()
+    }
+
+    private fun unregisterNsdService() {
+
+        val manager = nsdManager
+        val listener = nsdRegistrationListener
+
+        if (manager != null && listener != null) {
+
+            try {
+                manager.unregisterService(listener)
+            } catch (_: Exception) {
+            }
+        }
+
+        nsdRegistrationListener = null
     }
 
     override fun onStartCommand(
@@ -260,7 +354,9 @@ class GatewayService : Service() {
         )
 
         val manager =
-            getSystemService(NotificationManager::class.java)
+            getSystemService(
+                NotificationManager::class.java
+            )
 
         manager.createNotificationChannel(channel)
     }
@@ -287,7 +383,9 @@ class GatewayService : Service() {
     ) {
 
         val manager =
-            getSystemService(NotificationManager::class.java)
+            getSystemService(
+                NotificationManager::class.java
+            )
 
         manager.notify(
             NOTIFICATION_ID,
