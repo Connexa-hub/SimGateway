@@ -101,41 +101,26 @@ class GatewayService : Service() {
                     )
                 )
 
-                updateNotification(
-                    "Sending raw greeting..."
+                // Initial greeting
+                output.write(
+                    "HELLO FROM PHONE A\n".toByteArray()
                 )
 
-                val greeting =
-                    "HELLO FROM PHONE A\n".toByteArray()
-
-                output.write(greeting)
                 output.flush()
 
                 updateNotification(
-                    "Raw greeting sent"
+                    "Client session active"
                 )
 
-                socket.shutdownOutput()
-
-                updateNotification(
-                    "Output shutdown"
-                )
-
+                // Keep the connection alive and wait for commands.
                 while (true) {
 
                     val message = reader.readLine()
                         ?: break
 
-                    when (message.trim().uppercase()) {
+                    val command = message.trim().uppercase()
 
-                        "STATUS" -> {
-
-                            output.write(
-                                "SIM GATEWAY ONLINE\n".toByteArray()
-                            )
-
-                            output.flush()
-                        }
+                    when (command) {
 
                         "PING" -> {
 
@@ -144,6 +129,43 @@ class GatewayService : Service() {
                             )
 
                             output.flush()
+
+                            updateNotification(
+                                "PING received"
+                            )
+                        }
+
+                        "STATUS" -> {
+
+                            output.write(
+                                "SIM GATEWAY ONLINE\n".toByteArray()
+                            )
+
+                            output.flush()
+
+                            updateNotification(
+                                "STATUS requested"
+                            )
+                        }
+
+                        "HELLO" -> {
+
+                            output.write(
+                                "HELLO FROM PHONE A\n".toByteArray()
+                            )
+
+                            output.flush()
+                        }
+
+                        "QUIT" -> {
+
+                            output.write(
+                                "GOODBYE\n".toByteArray()
+                            )
+
+                            output.flush()
+
+                            break
                         }
 
                         else -> {
@@ -156,6 +178,10 @@ class GatewayService : Service() {
                         }
                     }
                 }
+
+                updateNotification(
+                    "Client disconnected"
+                )
 
             } catch (e: Exception) {
 
