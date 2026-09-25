@@ -12,6 +12,11 @@ import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.net.Socket
+import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
 
@@ -21,14 +26,21 @@ class MainActivity : Activity() {
     }
 
     private lateinit var statusText: TextView
+
     private var nsdManager: NsdManager? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+
+    private var gatewaySocket: Socket? = null
+    private var gatewayOutput: OutputStream? = null
+    private var gatewayReader: BufferedReader? = null
+
+    private var gatewayHost: String? = null
+    private var gatewayPort: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        nsdManager =
-            getSystemService(NsdManager::class.java)
+        nsdManager = getSystemService(NsdManager::class.java)
 
         showRoleSelection()
     }
@@ -71,13 +83,7 @@ class MainActivity : Activity() {
             }
         }
 
-        root.addView(
-            title,
-            LinearLayout.LayoutParams(
-                -1,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
+        root.addView(title)
 
         root.addView(
             subtitle,
@@ -113,6 +119,7 @@ class MainActivity : Activity() {
     private fun startGatewayMode() {
 
         stopDiscovery()
+        disconnectGateway()
 
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -122,9 +129,7 @@ class MainActivity : Activity() {
         ) {
 
             requestPermissions(
-                arrayOf(
-                    Manifest.permission.POST_NOTIFICATIONS
-                ),
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
                 NOTIFICATION_PERMISSION_REQUEST
             )
 
@@ -160,7 +165,7 @@ class MainActivity : Activity() {
 
         statusText = TextView(this).apply {
             text =
-                "\nPROVIDER MODE\n\n" +
+                "PROVIDER MODE\n\n" +
                 "Gateway service started.\n\n" +
                 "This phone is providing its SIM."
             textSize = 18f
@@ -211,6 +216,7 @@ class MainActivity : Activity() {
     private fun startClientMode() {
 
         stopDiscovery()
+        disconnectGateway()
 
         showClientScreen()
 
@@ -233,7 +239,7 @@ class MainActivity : Activity() {
 
         statusText = TextView(this).apply {
             text =
-                "\nCLIENT MODE\n\n" +
+                "CLIENT MODE\n\n" +
                 "Searching for SIM Gateway..."
             textSize = 18f
             gravity = Gravity.CENTER
@@ -244,6 +250,7 @@ class MainActivity : Activity() {
 
             setOnClickListener {
                 stopDiscovery()
+                disconnectGateway()
                 showRoleSelection()
             }
         }
@@ -280,7 +287,9 @@ class MainActivity : Activity() {
         discoveryListener =
             object : NsdManager.DiscoveryListener {
 
-                override fun onDiscoveryStarted(serviceType: String) {
+                override fun onDiscoveryStarted(
+                    serviceType: String
+                ) {
 
                     updateStatus(
                         "CLIENT MODE\n\n" +
@@ -293,24 +302,32 @@ class MainActivity : Activity() {
                 ) {
 
                     if (
-                        serviceInfo.serviceType
-                            .equals(
-                                SERVICE_TYPE,
-                                ignoreCase = true
-                            )
+                        serviceInfo.serviceType.equals(
+                            SERVICE_TYPE,
+                            ignoreCase = true
+                        )
                     ) {
 
                         updateStatus(
-                            "CLIENT MODE\n\n" +
-                            "Gateway found:\n" +
+                            "GATEWAY FOUND\n\n" +
                             serviceInfo.serviceName +
                             "\n\nResolving..."
                         )
 
-                        manager.resolveService(
-                            serviceInfo,
-                            createResolveListener()
-                        )
+                        try {
+
+                            manager.resolveService(
+                                serviceInfo,
+                                createResolveListener()
+                            )
+
+                        } catch (e: Exception) {
+
+                            updateStatus(
+                                "RESOLUTION ERROR\n\n" +
+                                e.message
+                            )
+                        }
                     }
                 }
 
@@ -355,7 +372,8 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
 
             updateStatus(
-                "DISCOVERY ERROR\n\n${e.message}"
+                "DISCOVERY ERROR\n\n" +
+                e.message
             )
         }
     }
@@ -371,7 +389,7 @@ class MainActivity : Activity() {
             ) {
 
                 updateStatus(
-                    "Gateway found, but resolution failed.\n\n" +
+                    "RESOLUTION FAILED\n\n" +
                     "Code: $errorCode"
                 )
             }
@@ -380,20 +398,220 @@ class MainActivity : Activity() {
                 serviceInfo: NsdServiceInfo
             ) {
 
-                val host = serviceInfo.host
-                val port = serviceInfo.port
+                gatewayHost =
+                    serviceInfo.host.hostAddress
+
+                gatewayPort =
+                    serviceInfo.port
 
                 updateStatus(
                     "GATEWAY FOUND\n\n" +
                     "Name: ${serviceInfo.serviceName}\n\n" +
-                    "Address: ${host.hostAddress}\n" +
-                    "Port: $port\n\n" +
+                    "Address: $gatewayHost\n" +
+                    "Port: $gatewayPort\n\n" +
                     "Ready to connect."
                 )
 
                 stopDiscovery()
+
+                showConnectScreen()
             }
         }
+    }
+
+    private fun showConnectScreen() {
+
+        runOnUiThread {
+
+            val root = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(40, 60, 40, 40)
+            }
+
+            val title = TextView(this).apply {
+                text = "SIM Gateway"
+                textSize = 28f
+                gravity = Gravity.CENTER
+            }
+
+            statusText = TextView(this).apply {
+                text =
+                    "GATEWAY FOUND\n\n" +
+                    "Address: $gatewayHost\n" +
+                    "Port: $gatewayPort\n\n" +
+                    "Ready to connect."
+                textSize = 18f
+                gravity = Gravity.CENTER
+            }
+
+            val connectButton = Button(this).apply {
+                text = "CONNECT TO GATEWAY"
+                textSize = 16f
+
+                setOnClickListener {
+                    connectToGateway()
+                }
+            }
+
+            val backButton = Button(this).apply {
+                text = "BACK"
+
+                setOnClickListener {
+                    disconnectGateway()
+                    showRoleSelection()
+                }
+            }
+
+            root.addView(title)
+
+            root.addView(
+                statusText,
+                LinearLayout.LayoutParams(
+                    -1,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 30
+                }
+            )
+
+            root.addView(
+                connectButton,
+                LinearLayout.LayoutParams(
+                    -1,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 40
+                }
+            )
+
+            root.addView(
+                backButton,
+                LinearLayout.LayoutParams(
+                    -1,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 15
+                }
+            )
+
+            setContentView(root)
+        }
+    }
+
+    private fun connectToGateway() {
+
+        val host = gatewayHost
+        val port = gatewayPort
+
+        if (host == null || port <= 0) {
+
+            updateStatus(
+                "CONNECTION ERROR\n\n" +
+                "Gateway address is unavailable."
+            )
+
+            return
+        }
+
+        updateStatus(
+            "CONNECTING...\n\n" +
+            "$host:$port"
+        )
+
+        thread(
+            start = true,
+            name = "SimGatewayClient"
+        ) {
+
+            try {
+
+                val socket =
+                    Socket(host, port)
+
+                gatewaySocket = socket
+
+                gatewayOutput =
+                    socket.getOutputStream()
+
+                gatewayReader =
+                    BufferedReader(
+                        InputStreamReader(
+                            socket.getInputStream()
+                        )
+                    )
+
+                val greeting =
+                    gatewayReader!!.readLine()
+
+                updateStatus(
+                    "CONNECTED\n\n" +
+                    "Gateway: $host:$port\n\n" +
+                    "Server: $greeting"
+                )
+
+                sendPing()
+
+            } catch (e: Exception) {
+
+                disconnectGateway()
+
+                updateStatus(
+                    "CONNECTION FAILED\n\n" +
+                    "${e.javaClass.simpleName}\n" +
+                    "${e.message}"
+                )
+            }
+        }
+    }
+
+    private fun sendPing() {
+
+        thread(
+            start = true,
+            name = "SimGatewayPing"
+        ) {
+
+            try {
+
+                gatewayOutput?.write(
+                    "PING\n".toByteArray(Charsets.UTF_8)
+                )
+
+                gatewayOutput?.flush()
+
+                val response =
+                    gatewayReader?.readLine()
+
+                if (response != null) {
+
+                    updateStatus(
+                        "CONNECTED\n\n" +
+                        "Gateway online.\n\n" +
+                        "Response: $response"
+                    )
+                }
+
+            } catch (e: Exception) {
+
+                updateStatus(
+                    "CONNECTION LOST\n\n" +
+                    e.message
+                )
+            }
+        }
+    }
+
+    private fun disconnectGateway() {
+
+        try {
+            gatewaySocket?.close()
+        } catch (_: Exception) {
+        }
+
+        gatewaySocket = null
+        gatewayOutput = null
+        gatewayReader = null
     }
 
     private fun updateStatus(message: String) {
@@ -425,6 +643,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
 
         stopDiscovery()
+        disconnectGateway()
 
         super.onDestroy()
     }
