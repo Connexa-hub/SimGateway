@@ -476,7 +476,6 @@ class MainActivity : Activity() {
 
         setContentView(layout)
 
-        gatewayStatusView = status
     }
 
     private fun connectToGateway() {
