@@ -483,21 +483,11 @@ class MainActivity : Activity() {
         val port = gatewayPort
 
         if (host == null || port <= 0) {
-            updateStatus(
-                "CONNECTION ERROR
-
-" +
-                "Gateway address is unavailable."
-            )
+            updateStatus("CONNECTION ERROR: Gateway address is unavailable.")
             return
         }
 
-        updateStatus(
-            "CONNECTING...
-
-" +
-            "$host:$port"
-        )
+        updateStatus("CONNECTING to $host:$port")
 
         thread(
             start = true,
@@ -518,44 +508,27 @@ class MainActivity : Activity() {
                 val greeting = gatewayReader!!.readLine()
 
                 updateStatus(
-                    "CONNECTED
-
-" +
-                    "Gateway: $host:$port
-
-" +
-                    "Server: $greeting"
+                    "CONNECTED. Gateway: $host:$port. Server: $greeting"
                 )
 
                 gatewayOutput!!.write(
-                    "PING
-".toByteArray(Charsets.UTF_8)
+                    "PING".toByteArray(Charsets.UTF_8)
                 )
+                gatewayOutput!!.write(10)
                 gatewayOutput!!.flush()
 
                 val response = gatewayReader!!.readLine()
 
                 if (response != null) {
                     updateStatus(
-                        "CONNECTED
-
-" +
-                        "Gateway online.
-
-" +
-                        "Response: $response"
+                        "CONNECTED. Gateway online. Response: $response"
                     )
                 }
             } catch (e: Exception) {
                 disconnectGateway()
 
                 updateStatus(
-                    "CONNECTION FAILED
-
-" +
-                    "${e.javaClass.simpleName}
-" +
-                    "${e.message}"
+                    "CONNECTION FAILED: ${e.javaClass.simpleName}: ${e.message}"
                 )
             }
         }
