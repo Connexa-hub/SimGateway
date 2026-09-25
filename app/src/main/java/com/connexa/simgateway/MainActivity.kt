@@ -479,22 +479,23 @@ class MainActivity : Activity() {
     }
 
     private fun connectToGateway() {
-
         val host = gatewayHost
         val port = gatewayPort
 
         if (host == null || port <= 0) {
-
             updateStatus(
-                "CONNECTION ERROR\n\n" +
+                "CONNECTION ERROR
+
+" +
                 "Gateway address is unavailable."
             )
-
             return
         }
 
         updateStatus(
-            "CONNECTING...\n\n" +
+            "CONNECTING...
+
+" +
             "$host:$port"
         )
 
@@ -502,42 +503,58 @@ class MainActivity : Activity() {
             start = true,
             name = "SimGatewayClient"
         ) {
-
             try {
-
-                val socket =
-                    Socket(host, port)
-
+                val socket = Socket(host, port)
                 gatewaySocket = socket
 
-                gatewayOutput =
-                    socket.getOutputStream()
+                gatewayOutput = socket.getOutputStream()
 
-                gatewayReader =
-                    BufferedReader(
-                        InputStreamReader(
-                            socket.getInputStream()
-                        )
+                gatewayReader = BufferedReader(
+                    InputStreamReader(
+                        socket.getInputStream()
                     )
+                )
 
-                val greeting =
-                    gatewayReader!!.readLine()
+                val greeting = gatewayReader!!.readLine()
 
                 updateStatus(
-                    "CONNECTED\n\n" +
-                    "Gateway: $host:$port\n\n" +
+                    "CONNECTED
+
+" +
+                    "Gateway: $host:$port
+
+" +
                     "Server: $greeting"
                 )
 
-                sendPing()
+                gatewayOutput!!.write(
+                    "PING
+".toByteArray(Charsets.UTF_8)
+                )
+                gatewayOutput!!.flush()
 
+                val response = gatewayReader!!.readLine()
+
+                if (response != null) {
+                    updateStatus(
+                        "CONNECTED
+
+" +
+                        "Gateway online.
+
+" +
+                        "Response: $response"
+                    )
+                }
             } catch (e: Exception) {
-
                 disconnectGateway()
 
                 updateStatus(
-                    "CONNECTION FAILED\n\n" +
-                    "${e.javaClass.simpleName}\n" +
+                    "CONNECTION FAILED
+
+" +
+                    "${e.javaClass.simpleName}
+" +
                     "${e.message}"
                 )
             }
