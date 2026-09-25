@@ -21,7 +21,7 @@ import kotlin.concurrent.thread
 class MainActivity : Activity() {
 
     companion object {
-        private const val NOTIFICATION_PERMISSION_REQUEST = 100
+        private const val PERMISSION_REQUEST = 100
         private const val SERVICE_TYPE = "_simgateway._tcp."
     }
 
@@ -117,26 +117,31 @@ class MainActivity : Activity() {
     }
 
     private fun startGatewayMode() {
-
-        stopDiscovery()
-        disconnectGateway()
+        val permissions = mutableListOf<String>()
 
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(
-                Manifest.permission.POST_NOTIFICATIONS
-            ) != PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-
-            requestPermissions(
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                NOTIFICATION_PERMISSION_REQUEST
-            )
-
-            return
+            permissions.add(android.Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        startGatewayService()
+        if (
+            checkSelfPermission(android.Manifest.permission.CALL_PHONE) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions.add(android.Manifest.permission.CALL_PHONE)
+        }
+
+        if (permissions.isNotEmpty()) {
+            requestPermissions(
+                permissions.toTypedArray(),
+                PERMISSION_REQUEST
+            )
+        } else {
+            startGatewayService()
+        }
     }
 
     private fun startGatewayService() {
@@ -420,83 +425,58 @@ class MainActivity : Activity() {
     }
 
     private fun showConnectScreen() {
+        val layout = LinearLayout(this)
+        layout.orientation = LinearLayout.VERTICAL
+        layout.setPadding(24, 24, 24, 24)
 
-        runOnUiThread {
+        val title = TextView(this)
+        title.text = "Gateway Found"
+        title.textSize = 24f
 
-            val root = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(40, 60, 40, 40)
-            }
+        val info = TextView(this)
+        info.text = "Gateway: $gatewayHost:$gatewayPort"
+        info.textSize = 16f
 
-            val title = TextView(this).apply {
-                text = "SIM Gateway"
-                textSize = 28f
-                gravity = Gravity.CENTER
-            }
+        val status = TextView(this)
+        status.text = "Ready to connect."
+        status.textSize = 16f
 
-            statusText = TextView(this).apply {
-                text =
-                    "GATEWAY FOUND\n\n" +
-                    "Address: $gatewayHost\n" +
-                    "Port: $gatewayPort\n\n" +
-                    "Ready to connect."
-                textSize = 18f
-                gravity = Gravity.CENTER
-            }
-
-            val connectButton = Button(this).apply {
-                text = "CONNECT TO GATEWAY"
-                textSize = 16f
-
-                setOnClickListener {
-                    connectToGateway()
-                }
-            }
-
-            val backButton = Button(this).apply {
-                text = "BACK"
-
-                setOnClickListener {
-                    disconnectGateway()
-                    showRoleSelection()
-                }
-            }
-
-            root.addView(title)
-
-            root.addView(
-                statusText,
-                LinearLayout.LayoutParams(
-                    -1,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = 30
-                }
-            )
-
-            root.addView(
-                connectButton,
-                LinearLayout.LayoutParams(
-                    -1,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = 40
-                }
-            )
-
-            root.addView(
-                backButton,
-                LinearLayout.LayoutParams(
-                    -1,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = 15
-                }
-            )
-
-            setContentView(root)
+        val connectButton = Button(this)
+        connectButton.text = "CONNECT TO GATEWAY"
+        connectButton.setOnClickListener {
+            connectToGateway()
         }
+
+        val numberInput = android.widget.EditText(this)
+        numberInput.hint = "Enter phone number"
+        numberInput.inputType =
+            android.text.InputType.TYPE_CLASS_PHONE
+
+        val callButton = Button(this)
+        callButton.text = "CALL THROUGH GATEWAY"
+        callButton.isEnabled = false
+
+        callButton.setOnClickListener {
+            val number = numberInput.text.toString().trim()
+
+            if (number.isEmpty()) {
+                status.text = "Enter a phone number first."
+                return@setOnClickListener
+            }
+
+            sendCall(number)
+        }
+
+        layout.addView(title)
+        layout.addView(info)
+        layout.addView(status)
+        layout.addView(connectButton)
+        layout.addView(numberInput)
+        layout.addView(callButton)
+
+        setContentView(layout)
+
+        gatewayStatusView = status
     }
 
     private fun connectToGateway() {
@@ -561,6 +541,28 @@ class MainActivity : Activity() {
                     "${e.javaClass.simpleName}\n" +
                     "${e.message}"
                 )
+            }
+        }
+    }
+
+    private fun sendCall(number: String) {
+        thread {
+            try {
+                val id = System.currentTimeMillis().toString()
+
+                val json =
+                    "{\"v\":1,\"id\":\"$id\",\"type\":\"call\",\"number\":\"$number\"}\n"
+
+                gatewayOutput?.write(json.toByteArray(Charsets.UTF_8))
+                gatewayOutput?.flush()
+
+                val response = gatewayReader?.readLine()
+
+                updateStatus(
+                    "CALL REQUEST SENT\n\nResponse: $response"
+                )
+            } catch (e: Exception) {
+                updateStatus("CALL ERROR\n\n${e.message}")
             }
         }
     }
@@ -653,28 +655,20 @@ class MainActivity : Activity() {
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
-
         super.onRequestPermissionsResult(
             requestCode,
             permissions,
             grantResults
         )
 
-        if (
-            requestCode ==
-            NOTIFICATION_PERMISSION_REQUEST
-        ) {
+        if (requestCode == PERMISSION_REQUEST) {
+            val callPhoneGranted =
+                checkSelfPermission(android.Manifest.permission.CALL_PHONE) ==
+                    PackageManager.PERMISSION_GRANTED
 
-            if (
-                grantResults.isNotEmpty() &&
-                grantResults[0] ==
-                PackageManager.PERMISSION_GRANTED
-            ) {
-
+            if (callPhoneGranted) {
                 startGatewayService()
-
             } else {
-
                 showRoleSelection()
             }
         }

@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.IBinder
@@ -30,7 +31,8 @@ class GatewayService : Service() {
     private var heartbeatThread: Thread? = null
 
     private var nsdManager: NsdManager? = null
-    private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
+    private var nsdRegistrationListener:
+        NsdManager.RegistrationListener? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -71,7 +73,8 @@ class GatewayService : Service() {
                     val client = serverSocket!!.accept()
 
                     updateNotification(
-                        "Client connected: ${client.inetAddress.hostAddress}"
+                        "Client connected: " +
+                            client.inetAddress.hostAddress
                     )
 
                     thread(
@@ -87,7 +90,8 @@ class GatewayService : Service() {
                 if (!Thread.currentThread().isInterrupted) {
 
                     updateNotification(
-                        "Server error: ${e.javaClass.simpleName}"
+                        "Server error: " +
+                            e.javaClass.simpleName
                     )
 
                     e.printStackTrace()
@@ -112,9 +116,8 @@ class GatewayService : Service() {
                 override fun onServiceRegistered(
                     serviceInfo: NsdServiceInfo
                 ) {
-
                     updateNotification(
-                        "Gateway discoverable as ${serviceInfo.serviceName}"
+                        "Gateway discoverable"
                     )
                 }
 
@@ -122,7 +125,6 @@ class GatewayService : Service() {
                     serviceInfo: NsdServiceInfo,
                     errorCode: Int
                 ) {
-
                     updateNotification(
                         "NSD registration failed: $errorCode"
                     )
@@ -153,8 +155,6 @@ class GatewayService : Service() {
             updateNotification(
                 "NSD error: ${e.javaClass.simpleName}"
             )
-
-            e.printStackTrace()
         }
     }
 
@@ -164,22 +164,20 @@ class GatewayService : Service() {
 
             try {
 
-                updateNotification(
-                    "Handling client: ${socket.inetAddress.hostAddress}"
-                )
-
                 val output = socket.getOutputStream()
 
-                val reader = BufferedReader(
-                    InputStreamReader(
-                        socket.getInputStream()
+                val reader =
+                    BufferedReader(
+                        InputStreamReader(
+                            socket.getInputStream()
+                        )
                     )
-                )
 
+                // Connection greeting.
                 output.write(
-                    "HELLO FROM PHONE A\n".toByteArray()
+                    "HELLO FROM PHONE A\n"
+                        .toByteArray(Charsets.UTF_8)
                 )
-
                 output.flush()
 
                 updateNotification(
@@ -193,63 +191,64 @@ class GatewayService : Service() {
                             ?: break
 
                     val command =
-                        message.trim().uppercase()
+                        message.trim()
 
-                    when (command) {
+                    when {
 
-                        "PING" -> {
-
-                            output.write(
-                                "PONG\n".toByteArray()
-                            )
-
-                            output.flush()
-
-                            updateNotification(
-                                "PING received"
-                            )
-                        }
-
-                        "STATUS" -> {
+                        command.equals(
+                            "PING",
+                            ignoreCase = true
+                        ) -> {
 
                             output.write(
-                                "SIM GATEWAY ONLINE\n".toByteArray()
+                                "PONG\n"
+                                    .toByteArray(Charsets.UTF_8)
                             )
-
-                            output.flush()
-
-                            updateNotification(
-                                "STATUS requested"
-                            )
-                        }
-
-                        "HELLO" -> {
-
-                            output.write(
-                                "HELLO FROM PHONE A\n".toByteArray()
-                            )
-
                             output.flush()
                         }
 
-                        "QUIT" -> {
+                        command.equals(
+                            "STATUS",
+                            ignoreCase = true
+                        ) -> {
 
                             output.write(
-                                "GOODBYE\n".toByteArray()
+                                "SIM GATEWAY ONLINE\n"
+                                    .toByteArray(Charsets.UTF_8)
                             )
+                            output.flush()
+                        }
 
+                        command.equals(
+                            "QUIT",
+                            ignoreCase = true
+                        ) -> {
+
+                            output.write(
+                                "GOODBYE\n"
+                                    .toByteArray(Charsets.UTF_8)
+                            )
                             output.flush()
 
                             break
                         }
 
+                        command.startsWith(
+                            "{\"v\":1"
+                        ) -> {
+
+                            handleJsonCommand(
+                                command,
+                                output
+                            )
+                        }
+
                         else -> {
 
                             output.write(
-                                "UNKNOWN COMMAND: $message\n"
-                                    .toByteArray()
+                                "UNKNOWN COMMAND\n"
+                                    .toByteArray(Charsets.UTF_8)
                             )
-
                             output.flush()
                         }
                     }
@@ -262,11 +261,143 @@ class GatewayService : Service() {
             } catch (e: Exception) {
 
                 updateNotification(
-                    "Client error: ${e.javaClass.simpleName}"
+                    "Client error: " +
+                        e.javaClass.simpleName
                 )
 
                 e.printStackTrace()
             }
+        }
+    }
+
+    private fun handleJsonCommand(
+        message: String,
+        output: java.io.OutputStream
+    ) {
+
+        val id =
+            extractJsonValue(message, "id")
+
+        val type =
+            extractJsonValue(message, "type")
+
+        when (type) {
+
+            "ping" -> {
+
+                sendJson(
+                    output,
+                    "{\"v\":1,\"id\":\"$id\",\"type\":\"pong\"}"
+                )
+            }
+
+            "status" -> {
+
+                sendJson(
+                    output,
+                    "{\"v\":1,\"id\":\"$id\",\"type\":\"status_response\",\"online\":true}"
+                )
+            }
+
+            "call" -> {
+
+                val number =
+                    extractJsonValue(
+                        message,
+                        "number"
+                    )
+
+                if (
+                    number == null ||
+                    number.isBlank()
+                ) {
+
+                    sendJson(
+                        output,
+                        "{\"v\":1,\"id\":\"$id\",\"type\":\"error\",\"message\":\"Missing phone number\"}"
+                    )
+
+                    return
+                }
+
+                placeCall(number)
+
+                sendJson(
+                    output,
+                    "{\"v\":1,\"id\":\"$id\",\"type\":\"call_started\",\"number\":\"$number\"}"
+                )
+            }
+
+            else -> {
+
+                sendJson(
+                    output,
+                    "{\"v\":1,\"id\":\"$id\",\"type\":\"error\",\"message\":\"Unknown command\"}"
+                )
+            }
+        }
+    }
+
+    private fun extractJsonValue(
+        json: String,
+        key: String
+    ): String? {
+
+        val pattern =
+            "\"$key\"\\s*:\\s*\"([^\"]*)\""
+
+        val regex =
+            Regex(pattern)
+
+        return regex
+            .find(json)
+            ?.groupValues
+            ?.getOrNull(1)
+    }
+
+    private fun sendJson(
+        output: java.io.OutputStream,
+        message: String
+    ) {
+
+        output.write(
+            (message + "\n")
+                .toByteArray(Charsets.UTF_8)
+        )
+
+        output.flush()
+    }
+
+    private fun placeCall(number: String) {
+
+        try {
+
+            updateNotification(
+                "Calling $number"
+            )
+
+            val intent =
+                Intent(
+                    Intent.ACTION_CALL,
+                    Uri.parse(
+                        "tel:" + Uri.encode(number)
+                    )
+                )
+
+            intent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK
+            )
+
+            startActivity(intent)
+
+        } catch (e: Exception) {
+
+            updateNotification(
+                "Call failed: " +
+                    e.javaClass.simpleName
+            )
+
+            e.printStackTrace()
         }
     }
 
@@ -291,7 +422,9 @@ class GatewayService : Service() {
 
                     Thread.sleep(3000)
 
-                } catch (e: InterruptedException) {
+                } catch (
+                    e: InterruptedException
+                ) {
 
                     break
                 }
@@ -321,7 +454,10 @@ class GatewayService : Service() {
         val manager = nsdManager
         val listener = nsdRegistrationListener
 
-        if (manager != null && listener != null) {
+        if (
+            manager != null &&
+            listener != null
+        ) {
 
             try {
                 manager.unregisterService(listener)
@@ -341,17 +477,21 @@ class GatewayService : Service() {
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? {
+    override fun onBind(
+        intent: Intent?
+    ): IBinder? {
+
         return null
     }
 
     private fun createNotificationChannel() {
 
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "SIM Gateway",
-            NotificationManager.IMPORTANCE_LOW
-        )
+        val channel =
+            NotificationChannel(
+                CHANNEL_ID,
+                "SIM Gateway",
+                NotificationManager.IMPORTANCE_LOW
+            )
 
         val manager =
             getSystemService(
