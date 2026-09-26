@@ -30,6 +30,14 @@ class GatewayService : Service() {
     private var serverThread: Thread? = null
     private var heartbeatThread: Thread? = null
 
+    // Tracks every accepted client socket so onDestroy can close them
+    // all explicitly instead of leaking their threads/sockets when
+    // the gateway is stopped or the service is killed.
+    private val activeClients =
+        java.util.Collections.synchronizedSet(
+            mutableSetOf<Socket>()
+        )
+
     private var nsdManager: NsdManager? = null
     private var nsdRegistrationListener:
         NsdManager.RegistrationListener? = null
@@ -160,6 +168,10 @@ class GatewayService : Service() {
 
     private fun handleClient(client: Socket) {
 
+        activeClients.add(client)
+
+        try {
+
         client.use { socket ->
 
             try {
@@ -267,6 +279,10 @@ class GatewayService : Service() {
 
                 e.printStackTrace()
             }
+        }
+
+        } finally {
+            activeClients.remove(client)
         }
     }
 
@@ -445,6 +461,19 @@ class GatewayService : Service() {
         }
 
         serverSocket = null
+
+        // Close every still-open client connection so their
+        // per-client threads unblock from readLine() (via
+        // IOException) and exit cleanly instead of leaking.
+        synchronized(activeClients) {
+            for (client in activeClients) {
+                try {
+                    client.close()
+                } catch (_: Exception) {
+                }
+            }
+            activeClients.clear()
+        }
 
         super.onDestroy()
     }

@@ -37,6 +37,15 @@ class MainActivity : Activity() {
     private var gatewayHost: String? = null
     private var gatewayPort: Int = 0
 
+    // Single-owner socket I/O lock. Section 17 of the project spec
+    // requires exactly one reader per TCP connection; a full
+    // request/response ConnectionManager with correlation IDs is
+    // planned for a later stage, but for Stage 01 we close the
+    // concurrency hole by serializing every write+read pair through
+    // this lock so two threads can never read the BufferedReader at
+    // the same time (e.g. a user double-tapping CALL).
+    private val socketIoLock = Any()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -403,23 +412,34 @@ class MainActivity : Activity() {
                 serviceInfo: NsdServiceInfo
             ) {
 
-                gatewayHost =
-                    serviceInfo.host.hostAddress
+                // CRITICAL: NsdManager callbacks run on an internal
+                // binder thread, never the main thread. Any UI work
+                // triggered from here (including setContentView via
+                // showConnectScreen) MUST be posted to the UI thread,
+                // or Android throws CalledFromWrongThreadException.
+                // This was the root cause of the provider-connects
+                // crash: showConnectScreen() used to be called
+                // directly from this callback.
+                runOnUiThread {
 
-                gatewayPort =
-                    serviceInfo.port
+                    gatewayHost =
+                        serviceInfo.host.hostAddress
 
-                updateStatus(
-                    "GATEWAY FOUND\n\n" +
-                    "Name: ${serviceInfo.serviceName}\n\n" +
-                    "Address: $gatewayHost\n" +
-                    "Port: $gatewayPort\n\n" +
-                    "Ready to connect."
-                )
+                    gatewayPort =
+                        serviceInfo.port
 
-                stopDiscovery()
+                    updateStatus(
+                        "GATEWAY FOUND\n\n" +
+                        "Name: ${serviceInfo.serviceName}\n\n" +
+                        "Address: $gatewayHost\n" +
+                        "Port: $gatewayPort\n\n" +
+                        "Ready to connect."
+                    )
 
-                showConnectScreen()
+                    stopDiscovery()
+
+                    showConnectScreen()
+                }
             }
         }
     }
@@ -505,19 +525,18 @@ class MainActivity : Activity() {
                     )
                 )
 
-                val greeting = gatewayReader!!.readLine()
+                // Greeting read happens before any other request can
+                // be issued (button isn't enabled yet), but we still
+                // route it through the shared lock for consistency.
+                val greeting = synchronized(socketIoLock) {
+                    gatewayReader!!.readLine()
+                }
 
                 updateStatus(
                     "CONNECTED. Gateway: $host:$port. Server: $greeting"
                 )
 
-                gatewayOutput!!.write(
-                    "PING".toByteArray(Charsets.UTF_8)
-                )
-                gatewayOutput!!.write(10)
-                gatewayOutput!!.flush()
-
-                val response = gatewayReader!!.readLine()
+                val response = sendAndAwaitResponse("PING\n")
 
                 if (response != null) {
                     updateStatus(
@@ -534,18 +553,38 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Writes [payload] and reads exactly one response line, holding
+     * [socketIoLock] for the whole write+read pair so no other thread
+     * can interleave a read on the same BufferedReader in between.
+     * Throws IOException if not currently connected.
+     */
+    private fun sendAndAwaitResponse(payload: String): String? {
+        synchronized(socketIoLock) {
+            val out = gatewayOutput
+                ?: throw java.io.IOException("Not connected to gateway")
+            val reader = gatewayReader
+                ?: throw java.io.IOException("Not connected to gateway")
+
+            out.write(payload.toByteArray(Charsets.UTF_8))
+            out.flush()
+
+            return reader.readLine()
+        }
+    }
+
     private fun sendCall(number: String) {
-        thread {
+        thread(
+            start = true,
+            name = "SimGatewayCall"
+        ) {
             try {
                 val id = System.currentTimeMillis().toString()
 
                 val json =
                     "{\"v\":1,\"id\":\"$id\",\"type\":\"call\",\"number\":\"$number\"}\n"
 
-                gatewayOutput?.write(json.toByteArray(Charsets.UTF_8))
-                gatewayOutput?.flush()
-
-                val response = gatewayReader?.readLine()
+                val response = sendAndAwaitResponse(json)
 
                 updateStatus(
                     "CALL REQUEST SENT\n\nResponse: $response"
@@ -556,53 +595,18 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun sendPing() {
-
-        thread(
-            start = true,
-            name = "SimGatewayPing"
-        ) {
-
-            try {
-
-                gatewayOutput?.write(
-                    "PING\n".toByteArray(Charsets.UTF_8)
-                )
-
-                gatewayOutput?.flush()
-
-                val response =
-                    gatewayReader?.readLine()
-
-                if (response != null) {
-
-                    updateStatus(
-                        "CONNECTED\n\n" +
-                        "Gateway online.\n\n" +
-                        "Response: $response"
-                    )
-                }
-
-            } catch (e: Exception) {
-
-                updateStatus(
-                    "CONNECTION LOST\n\n" +
-                    e.message
-                )
-            }
-        }
-    }
-
     private fun disconnectGateway() {
 
-        try {
-            gatewaySocket?.close()
-        } catch (_: Exception) {
-        }
+        synchronized(socketIoLock) {
+            try {
+                gatewaySocket?.close()
+            } catch (_: Exception) {
+            }
 
-        gatewaySocket = null
-        gatewayOutput = null
-        gatewayReader = null
+            gatewaySocket = null
+            gatewayOutput = null
+            gatewayReader = null
+        }
     }
 
     private fun updateStatus(message: String) {
