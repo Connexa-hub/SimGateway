@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="sg_bg">#F4F6FB</color>
+    <color name="sg_surface">#FFFFFF</color>
+    <color name="sg_surface_alt">#E8EEF9</color>
+    <color name="sg_text">#101828</color>
+    <color name="sg_text_dim">#566178</color>
+    <color name="sg_primary">#2563EB</color>
+    <color name="sg_on_primary">#FFFFFF</color>
+    <color name="sg_success">#15803D</color>
+    <color name="sg_warning">#B45309</color>
+    <color name="sg_danger">#DC2626</color>
+    <color name="sg_call">#15803D</color>
+    <color name="sg_on_call">#FFFFFF</color>
+    <color name="sg_danger_btn">#DC2626</color>
+    <color name="sg_on_danger">#FFFFFF</color>
+    <color name="sg_outline">#D3DAE8</color>
+    <color name="sg_ripple">#33808080</color>
+    <color name="sg_icon_bg">#2563EB</color>
+</resources>
