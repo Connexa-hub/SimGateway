@@ -41,22 +41,28 @@ import android.widget.TextView
 class MainActivity : Activity() {
 
     companion object {
-        private const val REQ_PERMISSIONS = 100
-        private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
-        private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+        const val REQ_PERMISSIONS = 100
+        const val REQ_CONTACTS = 101
+        const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+        const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
 
-    private lateinit var ui: Ui
-    private lateinit var root: LinearLayout
-    private lateinit var scroll: ScrollView
-    private lateinit var content: LinearLayout
+    internal lateinit var ui: Ui
+    internal lateinit var root: LinearLayout
+    internal lateinit var scroll: ScrollView
+    internal lateinit var content: LinearLayout
+    internal lateinit var bottomBar: FrameLayout
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val animators = mutableListOf<Animator>()
-    private var uptimeLabel: TextView? = null
+    internal val handler = Handler(Looper.getMainLooper())
+    internal val animators = mutableListOf<Animator>()
+    internal var uptimeLabel: TextView? = null
+    internal var callTimerLabel: TextView? = null
+    internal var callTimerStart: Long = 0L
     private var pinDialog: AlertDialog? = null
     private var launchAfterPermissions = false
     private var fixingPermissions = false
+    internal var onboardingIndex = 0
+    internal var contactsLoading = false
 
     private val appObserver: () -> Unit = { render() }
     private val gatewayObserver: () -> Unit = {
@@ -65,9 +71,15 @@ class MainActivity : Activity() {
     private val logObserver: () -> Unit = {
         handler.post { if (App.screen == App.Screen.LOG) render() }
     }
+    private val callHistoryObserver: () -> Unit = {
+        handler.post { if (App.screen == App.Screen.CLIENT && App.clientTab == App.ClientTab.RECENTS) render() }
+    }
     private val ticker = object : Runnable {
         override fun run() {
             uptimeLabel?.text = uptimeText()
+            if (App.callUi == App.CallUi.IN_CALL && callTimerStart > 0) {
+                callTimerLabel?.text = callDurationText()
+            }
             handler.postDelayed(this, 1000)
         }
     }
@@ -80,10 +92,6 @@ class MainActivity : Activity() {
         ui = Ui(this)
         buildRoot()
         setContentView(root)
-        if (!App.launchHandled) {
-            App.launchHandled = true
-            if (GatewayState.status == GatewayState.Status.ONLINE) App.screen = App.Screen.PROVIDER
-        }
     }
 
     override fun onStart() {
@@ -91,6 +99,12 @@ class MainActivity : Activity() {
         App.addObserver(appObserver)
         GatewayState.addListener(gatewayObserver)
         EventLog.addListener(logObserver)
+        CallHistory.addListener(callHistoryObserver)
+        if (App.screen == App.Screen.CLIENT && App.clientTab == App.ClientTab.CONTACTS &&
+            isGranted(Manifest.permission.READ_CONTACTS) && ContactsStore.cached().isEmpty()
+        ) {
+            loadContacts()
+        }
         render()
         handler.postDelayed(ticker, 1000)
     }
@@ -99,6 +113,7 @@ class MainActivity : Activity() {
         App.removeObserver(appObserver)
         GatewayState.removeListener(gatewayObserver)
         EventLog.removeListener(logObserver)
+        CallHistory.removeListener(callHistoryObserver)
         handler.removeCallbacks(ticker)
         cancelAnimators()
         pinDialog?.dismiss()
@@ -109,16 +124,23 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         when (App.screen) {
+            App.Screen.ONBOARDING -> super.onBackPressed()
             App.Screen.HOME -> super.onBackPressed()
-            App.Screen.PROVIDER -> go(App.Screen.HOME)
-            App.Screen.SEARCH, App.Screen.CONNECTING -> App.leaveClient()
-            App.Screen.HUB -> go(App.Screen.HOME)
-            App.Screen.DIALER, App.Screen.SMS -> go(App.Screen.HUB)
+            App.Screen.PROVIDER -> super.onBackPressed()
+            App.Screen.SEARCH, App.Screen.CONNECTING -> App.cancelSearchToClient()
+            App.Screen.CLIENT -> super.onBackPressed()
+            App.Screen.CALLING -> {
+                App.screen = App.Screen.CLIENT
+                App.clientTab = App.callReturnTab
+                App.changed()
+            }
+            App.Screen.SMS -> go(App.Screen.CLIENT)
             App.Screen.LOG -> go(App.logReturn)
+            App.Screen.SETTINGS -> go(App.settingsReturn)
         }
     }
 
-    private fun go(s: App.Screen) {
+    internal fun go(s: App.Screen) {
         App.screen = s
         App.changed()
     }
@@ -139,7 +161,9 @@ class MainActivity : Activity() {
         scroll.addView(content, ViewGroup.LayoutParams(MATCH, WRAP))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        // Android 15+ draws edge-to-edge for targetSdk 35: keep content clear of system bars.
+        bottomBar = FrameLayout(this)
+        root.addView(bottomBar, LinearLayout.LayoutParams(MATCH, WRAP))
+
         root.setOnApplyWindowInsetsListener { v, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
@@ -155,48 +179,52 @@ class MainActivity : Activity() {
     private fun render() {
         cancelAnimators()
         uptimeLabel = null
+        callTimerLabel = null
         content.removeAllViews()
+        bottomBar.removeAllViews()
         when (App.screen) {
+            App.Screen.ONBOARDING -> onboardingScreen()
             App.Screen.HOME -> homeScreen()
             App.Screen.PROVIDER -> providerScreen()
             App.Screen.SEARCH -> searchScreen()
             App.Screen.CONNECTING -> connectingScreen()
-            App.Screen.HUB -> hubScreen()
-            App.Screen.DIALER -> dialerScreen()
+            App.Screen.CLIENT -> clientScreen()
+            App.Screen.CALLING -> callingScreen()
             App.Screen.SMS -> smsScreen()
             App.Screen.LOG -> logScreen()
+            App.Screen.SETTINGS -> settingsScreen()
         }
         maybeShowPinDialog()
     }
 
-    private fun cancelAnimators() {
+    internal fun cancelAnimators() {
         for (a in animators) a.cancel()
         animators.clear()
     }
 
-    private fun LinearLayout.add(v: View, top: Int = 0, height: Int = WRAP): View {
+    internal fun LinearLayout.add(v: View, top: Int = 0, height: Int = WRAP): View {
         addView(v, LinearLayout.LayoutParams(MATCH, height).apply { topMargin = ui.dp(top) })
         return v
     }
 
-    private fun LinearLayout.addWeighted(v: View, startMarginDp: Int = 0) {
+    internal fun LinearLayout.addWeighted(v: View, startMarginDp: Int = 0) {
         addView(v, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(startMarginDp) })
     }
 
-    private fun row(): LinearLayout {
+    internal fun row(): LinearLayout {
         val r = LinearLayout(this)
         r.orientation = LinearLayout.HORIZONTAL
         r.gravity = Gravity.CENTER_VERTICAL
         return r
     }
 
-    private fun column(): LinearLayout {
+    internal fun column(): LinearLayout {
         val c = LinearLayout(this)
         c.orientation = LinearLayout.VERTICAL
         return c
     }
 
-    private fun circleIcon(iconRes: Int, sizeDp: Int, iconDp: Int, bg: Int, tint: Int): FrameLayout {
+    internal fun circleIcon(iconRes: Int, sizeDp: Int, iconDp: Int, bg: Int, tint: Int): FrameLayout {
         val f = FrameLayout(this)
         f.background = ui.oval(bg)
         f.addView(ui.icon(iconRes, tint), FrameLayout.LayoutParams(ui.dp(iconDp), ui.dp(iconDp), Gravity.CENTER))
@@ -204,7 +232,26 @@ class MainActivity : Activity() {
         return f
     }
 
-    private fun header(title: String, subtitle: String? = null, onBack: (() -> Unit)?) {
+    internal fun avatarCircle(name: String, sizeDp: Int, bg: Int = ui.color(R.color.sg_surface_alt), textColor: Int = R.color.sg_primary): FrameLayout {
+        val f = FrameLayout(this)
+        f.background = ui.oval(bg)
+        val initials = initialsFor(name)
+        val t = ui.text(initials, sizeDp * 0.36f, textColor, bold = true, center = true)
+        f.addView(t, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
+        f.layoutParams = LinearLayout.LayoutParams(ui.dp(sizeDp), ui.dp(sizeDp))
+        return f
+    }
+
+    private fun initialsFor(name: String): String {
+        val parts = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        return when {
+            parts.isEmpty() -> "#"
+            parts.size == 1 -> parts[0].take(1).uppercase()
+            else -> (parts[0].take(1) + parts[1].take(1)).uppercase()
+        }
+    }
+
+    internal fun header(title: String, subtitle: String? = null, onBack: (() -> Unit)?) {
         val r = row()
         if (onBack != null) {
             val back = FrameLayout(this)
@@ -228,7 +275,28 @@ class MainActivity : Activity() {
         content.add(r)
     }
 
-    private fun infoRow(label: String, value: String, valueColor: Int = R.color.sg_text): View {
+    /** Header used on the two top-level mode screens: no back arrow, a settings gear instead. */
+    internal fun headerWithSettings(title: String, subtitle: String?, from: App.Screen) {
+        val r = row()
+        val col = column()
+        col.addView(ui.text(title, 22f, bold = true))
+        if (subtitle != null) col.addView(ui.text(subtitle, 14f, R.color.sg_text_dim))
+        r.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val gear = FrameLayout(this)
+        gear.isClickable = true
+        gear.isFocusable = true
+        gear.contentDescription = "Settings"
+        gear.background = ui.clickableBg(Color.TRANSPARENT, 24)
+        gear.addView(ui.icon(R.drawable.ic_settings, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER))
+        gear.setOnClickListener {
+            App.settingsReturn = from
+            go(App.Screen.SETTINGS)
+        }
+        r.addView(gear, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)))
+        content.add(r)
+    }
+
+    internal fun infoRow(label: String, value: String, valueColor: Int = R.color.sg_text): View {
         val r = row()
         r.addView(ui.text(label, 14f, R.color.sg_text_dim), LinearLayout.LayoutParams(0, WRAP, 1f))
         r.addView(ui.text(value, 15f, valueColor, bold = true))
@@ -236,7 +304,7 @@ class MainActivity : Activity() {
         return r
     }
 
-    private fun statCard(label: String, value: String, valueColor: Int = R.color.sg_text): Pair<LinearLayout, TextView> {
+    internal fun statCard(label: String, value: String, valueColor: Int = R.color.sg_text): Pair<LinearLayout, TextView> {
         val c = ui.card(14)
         c.addView(ui.text(label, 12f, R.color.sg_text_dim))
         val v = ui.text(value, 18f, valueColor, bold = true)
@@ -245,7 +313,7 @@ class MainActivity : Activity() {
         return Pair(c, v)
     }
 
-    private fun statRow(a: LinearLayout, b: LinearLayout) {
+    internal fun statRow(a: LinearLayout, b: LinearLayout) {
         val r = LinearLayout(this)
         r.orientation = LinearLayout.HORIZONTAL
         r.addWeighted(a)
@@ -253,18 +321,59 @@ class MainActivity : Activity() {
         content.add(r, top = 12)
     }
 
-    private fun connectionStrip() {
-        val connected = App.connState == ConnectionManager.State.CONNECTED
-        val strip = row()
-        strip.setPadding(ui.dp(14), ui.dp(10), ui.dp(14), ui.dp(10))
-        strip.background = ui.rounded(ui.color(R.color.sg_surface_alt), 14)
-        strip.addView(ui.dot(if (connected) R.color.sg_success else R.color.sg_danger, 10))
-        val label = if (connected) "Connected to ${App.gatewayName}" else "Not connected"
-        strip.addView(
-            ui.text(label, 14f, R.color.sg_text, bold = true),
-            LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(10) }
+    // ---- ONBOARDING ------------------------------------------------------------------------
+
+    private data class OnboardPage(val icon: Int, val title: String, val body: String)
+
+    private val onboardPages = listOf(
+        OnboardPage(
+            R.drawable.ic_sim_card, "Meet LinkSIM",
+            "Share one phone's SIM \u2014 calls and texts \u2014 with another phone over Wi-Fi. No new SIM, no swapping cards."
+        ),
+        OnboardPage(
+            R.drawable.ic_swap, "Two roles, one app",
+            "On the phone with the SIM, choose Provide SIM. On the phone without one, choose Use Another Phone. Either phone can be either role."
+        ),
+        OnboardPage(
+            R.drawable.ic_lock, "Private by design",
+            "A 6-digit PIN pairs your two phones the first time they connect. Numbers in the diagnostics log are masked, and message text is never stored."
         )
-        content.add(strip, top = 12)
+    )
+
+    private fun onboardingScreen() {
+        val page = onboardPages[onboardingIndex]
+        content.add(View(this), top = 24, height = ui.dp(1))
+        val iconWrap = FrameLayout(this)
+        iconWrap.addView(
+            circleIcon(page.icon, 96, 44, ui.color(R.color.sg_surface_alt), R.color.sg_primary),
+            FrameLayout.LayoutParams(ui.dp(96), ui.dp(96), Gravity.CENTER)
+        )
+        content.add(iconWrap, top = 20, height = ui.dp(96))
+        content.add(ui.text(page.title, 24f, bold = true, center = true), top = 28)
+        content.add(ui.text(page.body, 15f, R.color.sg_text_dim, center = true), top = 10)
+
+        val dots = row()
+        dots.gravity = Gravity.CENTER
+        for (i in onboardPages.indices) {
+            val d = View(this)
+            d.background = ui.oval(ui.color(if (i == onboardingIndex) R.color.sg_primary else R.color.sg_outline))
+            dots.addView(d, LinearLayout.LayoutParams(ui.dp(8), ui.dp(8)).apply { marginStart = ui.dp(4); marginEnd = ui.dp(4) })
+        }
+        content.add(dots, top = 24, height = ui.dp(8))
+
+        if (onboardingIndex < onboardPages.size - 1) {
+            content.add(ui.button("Next", null, Ui.Kind.PRIMARY) {
+                onboardingIndex++
+                render()
+            }, top = 28)
+            content.add(ui.button("Skip", null, Ui.Kind.GHOST) {
+                App.finishOnboarding()
+            }, top = 10)
+        } else {
+            content.add(ui.button("Get started", null, Ui.Kind.PRIMARY) {
+                App.finishOnboarding()
+            }, top = 28)
+        }
     }
 
     // ---- HOME ------------------------------------------------------------------------------
@@ -279,90 +388,58 @@ class MainActivity : Activity() {
         )
         brand.addView(logo, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)))
         brand.addView(
-            ui.text("SIM GATEWAY", 22f, bold = true),
+            ui.text("LinkSIM", 22f, bold = true),
             LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(12) }
         )
         content.add(brand, top = 8)
         content.add(
-            ui.text("Share your phone's cellular connection with another trusted device.", 16f, R.color.sg_text_dim),
+            ui.text("Choose how this phone will be used.", 16f, R.color.sg_text_dim),
             top = 16
         )
 
-        val providerActive = GatewayState.status == GatewayState.Status.ONLINE ||
-            GatewayState.status == GatewayState.Status.STARTING
         content.add(
             roleCard(
-                "PROVIDER", "PROVIDE SIM", "Share this phone's SIM with another device.",
-                R.drawable.ic_sim_card, if (providerActive) "Gateway active" else null
-            ) {
-                if (providerActive) go(App.Screen.PROVIDER) else startProvider()
-            },
+                "PROVIDE SIM", "Share this phone's SIM", "Let another phone place calls and send texts through it.",
+                R.drawable.ic_sim_card
+            ) { App.chooseMode("provider") },
             top = 28
         )
-
-        val clientConnected = App.connState == ConnectionManager.State.CONNECTED
         content.add(
             roleCard(
-                "CLIENT", "USE ANOTHER PHONE", "Connect to another phone's SIM Gateway.",
-                R.drawable.ic_phone_android, if (clientConnected) "Connected" else null
-            ) {
-                if (clientConnected) go(App.Screen.HUB) else App.startSearch()
-            },
+                "USE ANOTHER PHONE", "Borrow a SIM over Wi-Fi", "Call and text using a SIM that's in a different phone.",
+                R.drawable.ic_phone_android
+            ) { App.chooseMode("client") },
             top = 14
         )
-
-        content.add(
-            ui.button("Activity log", R.drawable.ic_history, Ui.Kind.GHOST) {
-                App.logReturn = App.Screen.HOME
-                go(App.Screen.LOG)
-            },
-            top = 20
-        )
-        content.add(ui.text("Version ${versionName()}", 12f, R.color.sg_text_dim, center = true), top = 8)
+        content.add(ui.text("Version ${versionName()}", 12f, R.color.sg_text_dim, center = true), top = 24)
     }
 
-    private fun versionName(): String = try {
+    internal fun versionName(): String = try {
         packageManager.getPackageInfo(packageName, 0).versionName ?: ""
     } catch (e: Exception) {
         ""
     }
 
-    private fun roleCard(
-        role: String, title: String, desc: String, iconRes: Int, activeLabel: String?, onClick: () -> Unit
-    ): View {
-        val active = activeLabel != null
+    private fun roleCard(role: String, title: String, desc: String, iconRes: Int, onClick: () -> Unit): View {
         val card = row()
         card.setPadding(ui.dp(18), ui.dp(18), ui.dp(18), ui.dp(18))
-        card.background = ui.clickableBg(
-            ui.color(R.color.sg_surface), 22,
-            ui.color(if (active) R.color.sg_primary else R.color.sg_outline),
-            if (active) 2 else 1
-        )
+        card.background = ui.clickableBg(ui.color(R.color.sg_surface), 22, ui.color(R.color.sg_outline))
         card.isClickable = true
         card.isFocusable = true
-        card.contentDescription = "$title. $desc" + (if (activeLabel != null) ". $activeLabel" else "")
+        card.contentDescription = "$title. $desc"
         card.setOnClickListener { onClick() }
-
-        card.addView(
-            circleIcon(iconRes, 56, 28, ui.color(R.color.sg_surface_alt), R.color.sg_primary)
-        )
+        card.addView(circleIcon(iconRes, 56, 28, ui.color(R.color.sg_surface_alt), R.color.sg_primary))
         val col = column()
         col.addView(ui.text(role, 12f, R.color.sg_text_dim, bold = true))
         col.add(ui.text(title, 20f, bold = true), top = 2)
         col.add(ui.text(desc, 14f, R.color.sg_text_dim), top = 2)
-        if (activeLabel != null) {
-            col.addView(
-                ui.badge(activeLabel, R.color.sg_success),
-                LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = ui.dp(8) }
-            )
-        }
         card.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(16) })
         return card
     }
 
     // ---- PROVIDER --------------------------------------------------------------------------
 
-    private fun requiredPermissions(): List<String> {
+    internal fun requiredPermissions(): List<String> {
         val l = mutableListOf(
             Manifest.permission.CALL_PHONE,
             Manifest.permission.ANSWER_PHONE_CALLS,
@@ -374,9 +451,9 @@ class MainActivity : Activity() {
         return l
     }
 
-    private fun isGranted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+    internal fun isGranted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
-    private fun missingPermissions(): List<String> = requiredPermissions().filter { !isGranted(it) }
+    internal fun missingPermissions(): List<String> = requiredPermissions().filter { !isGranted(it) }
 
     private fun startProvider() {
         val missing = missingPermissions()
@@ -385,22 +462,22 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Allow this phone to act as the SIM")
+            .setTitle("Let this phone share its SIM")
             .setMessage(
-                "To share its SIM, this phone needs permission to:\n\n" +
+                "To act as the gateway, this phone needs permission to:\n\n" +
                     "\u2022 Make and end phone calls\n" +
                     "\u2022 Answer calls\n" +
                     "\u2022 See incoming calls and the caller's number\n" +
                     "\u2022 Send text messages\n" +
                     "\u2022 Show the gateway notification\n\n" +
-                    "Only a device that enters this phone's PIN can use them. " +
-                    "You can continue without some permissions, but those features won't work."
+                    "Only a phone that enters this phone's PIN can use them. " +
+                    "You can continue without some permissions, but those features won't work until you grant them."
             )
             .setPositiveButton("Continue") { _, _ ->
                 launchAfterPermissions = true
                 requestPermissions(missing.toTypedArray(), REQ_PERMISSIONS)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton("Not now", null)
             .show()
     }
 
@@ -421,6 +498,15 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_CONTACTS) {
+            if (isGranted(Manifest.permission.READ_CONTACTS)) {
+                loadContacts()
+            } else if (!shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)) {
+                offerSettings()
+            }
+            App.changed()
+            return
+        }
         if (requestCode != REQ_PERMISSIONS) return
         if (launchAfterPermissions) {
             launchAfterPermissions = false
@@ -436,10 +522,10 @@ class MainActivity : Activity() {
         App.changed()
     }
 
-    private fun offerSettings() {
+    internal fun offerSettings() {
         AlertDialog.Builder(this)
             .setTitle("Permission blocked")
-            .setMessage("Android won't ask again. Open the app settings and allow the missing permissions.")
+            .setMessage("Android won't ask again here. Open the app's settings and allow the missing permission.")
             .setPositiveButton("Open settings") { _, _ ->
                 try {
                     startActivity(
@@ -452,6 +538,18 @@ class MainActivity : Activity() {
             .show()
     }
 
+    internal fun loadContacts() {
+        if (contactsLoading) return
+        contactsLoading = true
+        Thread {
+            ContactsStore.load(applicationContext)
+            handler.post {
+                contactsLoading = false
+                if (App.screen == App.Screen.CLIENT && App.clientTab == App.ClientTab.CONTACTS) render()
+            }
+        }.start()
+    }
+
     private fun uptimeText(): String {
         val start = GatewayState.startedAt
         if (GatewayState.status != GatewayState.Status.ONLINE || start == 0L) return "\u2014"
@@ -460,6 +558,13 @@ class MainActivity : Activity() {
         val m = (s % 3600) / 60
         val sec = s % 60
         return if (h > 0) "${h}h ${m}m" else "${m}m ${sec}s"
+    }
+
+    internal fun callDurationText(): String {
+        val s = (System.currentTimeMillis() - callTimerStart) / 1000
+        val m = s / 60
+        val sec = s % 60
+        return String.format("%d:%02d", m, sec)
     }
 
     private fun networkLabel(): String {
@@ -485,18 +590,18 @@ class MainActivity : Activity() {
     }
 
     private fun providerScreen() {
-        header("Provider", null) { go(App.Screen.HOME) }
+        headerWithSettings("Provider", null, App.Screen.PROVIDER)
 
         val st = GatewayState.status
         val spec = when (st) {
             GatewayState.Status.ONLINE ->
-                Triple(R.color.sg_success, "Gateway Online", "This phone is providing its SIM")
+                Triple(R.color.sg_success, "You're online", "This phone is sharing its SIM")
             GatewayState.Status.STARTING ->
-                Triple(R.color.sg_warning, "Starting gateway\u2026", "Getting things ready")
+                Triple(R.color.sg_warning, "Starting up\u2026", "Getting the gateway ready")
             GatewayState.Status.ERROR ->
-                Triple(R.color.sg_danger, "Gateway problem", GatewayState.error ?: "Something went wrong")
+                Triple(R.color.sg_danger, "Something's wrong", GatewayState.error ?: "The gateway hit a problem")
             GatewayState.Status.STOPPED ->
-                Triple(R.color.sg_text_dim, "Gateway stopped", "Start it to share this phone's SIM")
+                Triple(R.color.sg_text_dim, "Not sharing", "Start the gateway to let another phone in")
         }
         val statusCard = ui.card(18)
         val top = row()
@@ -518,9 +623,9 @@ class MainActivity : Activity() {
         val running = st == GatewayState.Status.ONLINE
         val n = GatewayState.clientCount
         val sim = simLabel()
-        val (devCard, _) = statCard("Connected devices", n.toString())
+        val (devCard, _) = statCard("Connected phones", n.toString())
         val (discCard, _) = statCard(
-            "Discovery", GatewayState.discovery,
+            "Visibility", GatewayState.discovery,
             if (GatewayState.discovery.startsWith("Failed")) R.color.sg_danger else R.color.sg_text
         )
         statRow(devCard, discCard)
@@ -532,7 +637,6 @@ class MainActivity : Activity() {
         uptimeLabel = upView
         statRow(netCard, upCard)
 
-        // Pairing PIN
         val pinCard = ui.card(18)
         val pr = row()
         pr.addView(ui.icon(R.drawable.ic_lock, R.color.sg_primary), LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)))
@@ -547,11 +651,11 @@ class MainActivity : Activity() {
         pinView.contentDescription = "Pairing PIN " + pin.toCharArray().joinToString(" ")
         pinCard.add(pinView, top = 10)
         pinCard.add(
-            ui.text("Enter this on the other phone the first time it connects.", 13f, R.color.sg_text_dim),
+            ui.text("Share this with the other phone the first time it connects.", 13f, R.color.sg_text_dim),
             top = 4
         )
         pinCard.add(
-            ui.button("New PIN", null, Ui.Kind.SECONDARY) {
+            ui.button("Generate new PIN", null, Ui.Kind.SECONDARY) {
                 Prefs.regeneratePin(this)
                 EventLog.add("Pairing PIN changed")
                 render()
@@ -560,7 +664,6 @@ class MainActivity : Activity() {
         )
         content.add(pinCard, top = 12)
 
-        // Permissions
         val permCard = ui.card(18)
         permCard.addView(ui.text("Permissions", 15f, bold = true))
         permCard.add(permRow("Make calls", isGranted(Manifest.permission.CALL_PHONE)), top = 6)
@@ -583,13 +686,12 @@ class MainActivity : Activity() {
         }
         content.add(permCard, top = 12)
 
-        // Reliability tip
         val tip = ui.card(18)
-        tip.addView(ui.text("Keep it running", 15f, bold = true))
+        tip.addView(ui.text("Keep it reliable", 15f, bold = true))
         tip.add(
             ui.text(
-                "Keep both phones on the same Wi-Fi. If Android stops the gateway in the background, " +
-                    "exclude SIM Gateway from battery optimization.",
+                "Keep both phones on the same Wi-Fi network. If Android ever stops the gateway in the " +
+                    "background, exclude LinkSIM from battery optimization.",
                 13f, R.color.sg_text_dim
             ),
             top = 4
@@ -607,25 +709,17 @@ class MainActivity : Activity() {
 
         if (running || st == GatewayState.Status.STARTING) {
             content.add(
-                ui.button("Stop Gateway", R.drawable.ic_call_end, Ui.Kind.DANGER) {
+                ui.button("Stop sharing", R.drawable.ic_call_end, Ui.Kind.DANGER) {
                     GatewayService.stop(this)
-                    go(App.Screen.HOME)
                 },
                 top = 20
             )
         } else {
-            content.add(ui.button("Start Gateway", R.drawable.ic_sim_card, Ui.Kind.PRIMARY) { startProvider() }, top = 20)
+            content.add(ui.button("Start sharing", R.drawable.ic_sim_card, Ui.Kind.PRIMARY) { startProvider() }, top = 20)
         }
-        content.add(
-            ui.button("Activity log", R.drawable.ic_history, Ui.Kind.GHOST) {
-                App.logReturn = App.Screen.PROVIDER
-                go(App.Screen.LOG)
-            },
-            top = 8
-        )
     }
 
-    private fun permRow(label: String, granted: Boolean): View {
+    internal fun permRow(label: String, granted: Boolean): View {
         val r = row()
         r.setPadding(0, ui.dp(6), 0, ui.dp(6))
         r.addView(ui.text(label, 14f, R.color.sg_text), LinearLayout.LayoutParams(0, WRAP, 1f))
@@ -640,7 +734,7 @@ class MainActivity : Activity() {
 
     // ---- CLIENT: search / connect ----------------------------------------------------------
 
-    private fun pulseView(): View {
+    internal fun pulseView(): View {
         val box = FrameLayout(this)
         val size = ui.dp(170)
         for (i in 0 until 3) {
@@ -672,7 +766,7 @@ class MainActivity : Activity() {
     }
 
     private fun searchScreen() {
-        header("Use another phone", null) { App.leaveClient() }
+        header("Find a gateway", null) { App.cancelSearchToClient() }
 
         val err = App.searchError
         if (err != null) {
@@ -684,23 +778,21 @@ class MainActivity : Activity() {
         }
 
         if (App.gateways.isEmpty()) {
-            if (App.searchTimedOut && !App.searching.not()) {
-                emptyState()
-            } else if (App.searchTimedOut) {
+            if (App.searchTimedOut) {
                 emptyState()
             } else {
                 content.add(pulseView(), top = 24, height = ui.dp(190))
-                content.add(ui.text("SEARCHING FOR GATEWAYS\u2026", 16f, R.color.sg_text, bold = true, center = true), top = 8)
+                content.add(ui.text("SEARCHING\u2026", 16f, R.color.sg_text, bold = true, center = true), top = 8)
                 content.add(
                     ui.text(
-                        "Make sure the other phone is on the same Wi-Fi and has chosen PROVIDE SIM.",
+                        "Make sure the other phone is on the same Wi-Fi and has chosen Provide SIM.",
                         14f, R.color.sg_text_dim, center = true
                     ),
                     top = 8
                 )
             }
         } else {
-            content.add(ui.text("SIM Gateway found", 18f, bold = true), top = 20)
+            content.add(ui.text("Found nearby", 18f, bold = true), top = 20)
             for (g in App.gateways) content.add(gatewayCard(g), top = 12)
         }
     }
@@ -711,10 +803,10 @@ class MainActivity : Activity() {
         c.addView(
             circleIcon(R.drawable.ic_wifi, 64, 30, ui.color(R.color.sg_surface_alt), R.color.sg_text_dim)
         )
-        c.add(ui.text("No gateway found", 18f, R.color.sg_text, bold = true, center = true), top = 14)
+        c.add(ui.text("Nothing found yet", 18f, R.color.sg_text, bold = true, center = true), top = 14)
         c.add(
             ui.text(
-                "Check that the SIM phone has chosen PROVIDE SIM and that both phones are on the same Wi-Fi network.",
+                "Check that the SIM phone has chosen Provide SIM and that both phones share the same Wi-Fi network.",
                 14f, R.color.sg_text_dim, center = true
             ),
             top = 6
@@ -755,7 +847,7 @@ class MainActivity : Activity() {
     }
 
     private fun connectingScreen() {
-        header("Connecting", null) { App.cancelConnect() }
+        header("Connecting", null) { App.cancelSearchToClient() }
         val text = when {
             App.isLookingForGateway -> "Looking for ${App.gatewayName}\u2026"
             App.connState == ConnectionManager.State.AUTHENTICATING -> "Verifying PIN\u2026"
@@ -767,239 +859,12 @@ class MainActivity : Activity() {
         content.add(pb, top = 80, height = ui.dp(64))
         content.add(ui.text(text, 18f, R.color.sg_text, bold = true, center = true), top = 20)
         content.add(ui.text("This usually takes a few seconds.", 14f, R.color.sg_text_dim, center = true), top = 6)
-        content.add(ui.button("Cancel", null, Ui.Kind.SECONDARY) { App.cancelConnect() }, top = 32)
+        content.add(ui.button("Cancel", null, Ui.Kind.SECONDARY) { App.cancelSearchToClient() }, top = 32)
     }
 
-    // ---- CLIENT: hub -----------------------------------------------------------------------
+    // ---- shared small pieces used by ClientUi.kt / CallingUi.kt ----------------------------
 
-    private fun noticeBanner() {
-        val n = App.notice ?: return
-        val c = ui.card(14)
-        c.background = ui.rounded(ui.color(R.color.sg_surface), 16, ui.color(R.color.sg_warning), 2)
-        c.addView(ui.text(n, 14f, R.color.sg_text))
-        content.add(c, top = 12)
-    }
-
-    private fun incomingBanner() {
-        val n = App.incomingNumber ?: return
-        val c = ui.card(16)
-        c.background = ui.rounded(ui.color(R.color.sg_surface), 20, ui.color(R.color.sg_success), 2)
-        c.addView(ui.text("INCOMING CALL", 12f, R.color.sg_success, bold = true))
-        c.add(ui.text(if (n.isBlank()) "Unknown number" else n, 26f, bold = true), top = 4)
-        val r = LinearLayout(this)
-        r.orientation = LinearLayout.HORIZONTAL
-        r.addWeighted(ui.button("ANSWER", R.drawable.ic_call, Ui.Kind.CALL) { App.answer() })
-        r.addWeighted(ui.button("REJECT", R.drawable.ic_call_end, Ui.Kind.DANGER) { App.reject() }, 10)
-        c.add(r, top = 14)
-        content.add(c, top = 12)
-    }
-
-    private fun audioNote() {
-        content.add(
-            ui.text(
-                "Calls are placed and controlled through the SIM phone. Their voice audio stays on that phone " +
-                    "for now: Android doesn't let apps carry cellular call audio over Wi-Fi.",
-                12f, R.color.sg_text_dim
-            ),
-            top = 12
-        )
-    }
-
-    private fun hubScreen() {
-        val cs = App.connState
-        val connected = cs == ConnectionManager.State.CONNECTED
-        header("SIM Gateway", "Remote SIM access") { go(App.Screen.HOME) }
-        noticeBanner()
-        incomingBanner()
-
-        val card = ui.card(18)
-        val top = row()
-        val (dotColor, title, sub) = when (cs) {
-            ConnectionManager.State.CONNECTED -> Triple(R.color.sg_success, "CONNECTED", "Gateway online")
-            ConnectionManager.State.RECONNECTING -> Triple(R.color.sg_warning, "Reconnecting\u2026", "Trying to reach the gateway again")
-            ConnectionManager.State.CONNECTING, ConnectionManager.State.AUTHENTICATING ->
-                Triple(R.color.sg_warning, "Connecting\u2026", "Please wait")
-            else -> Triple(R.color.sg_danger, "Disconnected", "The gateway isn't reachable")
-        }
-        top.addView(ui.dot(dotColor, 14))
-        top.addView(
-            ui.text(title, 24f, bold = true),
-            LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(12) }
-        )
-        card.addView(top)
-        card.add(ui.text(sub, 15f, R.color.sg_text_dim), top = 4)
-        if (connected) {
-            val status = when {
-                App.incomingNumber != null -> "Ringing"
-                App.callUi == App.CallUi.IN_CALL || App.callUi == App.CallUi.DIALING -> "On a call"
-                else -> "Ready"
-            }
-            card.add(infoRow("Connected to", App.gatewayName), top = 12)
-            card.add(infoRow("Status", status, if (status == "Ready") R.color.sg_success else R.color.sg_text))
-            val simText = when (App.remoteSim) {
-                "ready" -> "Ready"
-                "absent" -> "No SIM"
-                "not_ready" -> "Locked / starting"
-                else -> "Unknown"
-            }
-            card.add(infoRow("SIM on gateway", simText, if (App.remoteSim == "ready") R.color.sg_success else R.color.sg_warning))
-        }
-        if (cs == ConnectionManager.State.RECONNECTING || cs == ConnectionManager.State.CONNECTING) {
-            val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-            pb.isIndeterminate = true
-            pb.indeterminateTintList = ColorStateList.valueOf(ui.color(R.color.sg_primary))
-            card.add(pb, top = 12)
-        }
-        content.add(card, top = 16)
-
-        if (connected && (App.callUi == App.CallUi.DIALING || App.callUi == App.CallUi.IN_CALL || App.callUi == App.CallUi.ENDING)) {
-            content.add(activeCallCard(), top = 12)
-        }
-
-        if (connected) {
-            content.add(ui.button("CALL", R.drawable.ic_call, Ui.Kind.CALL) { go(App.Screen.DIALER) }, top = 20)
-            content.add(ui.button("SMS", R.drawable.ic_message, Ui.Kind.PRIMARY) { go(App.Screen.SMS) }, top = 12)
-            content.add(ui.button("DISCONNECT", null, Ui.Kind.SECONDARY) { App.userDisconnect() }, top = 12)
-            audioNote()
-        } else if (cs == ConnectionManager.State.DISCONNECTED || cs == ConnectionManager.State.AUTH_FAILED) {
-            content.add(ui.button("RECONNECT", null, Ui.Kind.PRIMARY) { App.reconnect() }, top = 20)
-            content.add(ui.button("Choose another gateway", null, Ui.Kind.SECONDARY) { App.startSearch() }, top = 12)
-        }
-        content.add(
-            ui.button("Activity log", R.drawable.ic_history, Ui.Kind.GHOST) {
-                App.logReturn = App.Screen.HUB
-                go(App.Screen.LOG)
-            },
-            top = 12
-        )
-    }
-
-    private fun activeCallCard(): View {
-        val c = ui.card(18)
-        val label = when (App.callUi) {
-            App.CallUi.DIALING -> "DIALING\u2026"
-            App.CallUi.ENDING -> "ENDING CALL\u2026"
-            else -> "CALL IN PROGRESS"
-        }
-        c.addView(ui.text(label, 12f, R.color.sg_success, bold = true))
-        c.add(ui.text(if (App.callNumber.isBlank()) "Call" else App.callNumber, 24f, bold = true), top = 4)
-        c.add(ui.text("The call is running on the gateway phone.", 13f, R.color.sg_text_dim), top = 2)
-        c.add(
-            ui.button("END CALL", R.drawable.ic_call_end, Ui.Kind.DANGER, enabled = App.callUi != App.CallUi.ENDING) { App.hangup() },
-            top = 14
-        )
-        return c
-    }
-
-    // ---- CLIENT: dialer --------------------------------------------------------------------
-
-    private fun dialerScreen() {
-        header("CALL THROUGH SIM GATEWAY", null) { go(App.Screen.HUB) }
-        connectionStrip()
-        noticeBanner()
-        incomingBanner()
-
-        val connected = App.connState == ConnectionManager.State.CONNECTED
-        val busy = App.callUi == App.CallUi.DIALING || App.callUi == App.CallUi.IN_CALL || App.callUi == App.CallUi.ENDING
-
-        val display = row()
-        display.setPadding(ui.dp(16), ui.dp(8), ui.dp(4), ui.dp(8))
-        display.background = ui.rounded(ui.color(R.color.sg_surface), 20, ui.color(R.color.sg_outline))
-        val number = ui.text(
-            if (App.dial.isEmpty()) "Enter number" else App.dial, 30f,
-            if (App.dial.isEmpty()) R.color.sg_text_dim else R.color.sg_text, bold = true, center = true
-        )
-        number.maxLines = 1
-        number.ellipsize = TextUtils.TruncateAt.START
-        number.contentDescription = if (App.dial.isEmpty()) "No number entered" else "Number ${App.dial}"
-        display.addView(number, LinearLayout.LayoutParams(0, ui.dp(56), 1f))
-        val back = FrameLayout(this)
-        back.isClickable = true
-        back.isFocusable = true
-        back.contentDescription = "Delete last digit"
-        back.background = ui.clickableBg(Color.TRANSPARENT, 24)
-        back.addView(
-            ui.icon(R.drawable.ic_backspace, R.color.sg_text),
-            FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER)
-        )
-        back.setOnClickListener { if (!busy) App.dialBackspace() }
-        back.setOnLongClickListener {
-            if (!busy) App.dialClear()
-            true
-        }
-        display.addView(back, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)))
-        content.add(display, top = 16)
-
-        when (App.callUi) {
-            App.CallUi.DIALING, App.CallUi.IN_CALL, App.CallUi.ENDING -> content.add(activeCallCard(), top = 12)
-            App.CallUi.ENDED -> {
-                val c = ui.card(14)
-                c.addView(ui.text("Call ended", 16f, R.color.sg_text_dim, bold = true, center = true))
-                content.add(c, top = 12)
-            }
-            App.CallUi.FAILED -> {
-                val c = ui.card(16)
-                c.background = ui.rounded(ui.color(R.color.sg_surface), 20, ui.color(R.color.sg_danger), 2)
-                c.addView(ui.text("Call failed", 18f, R.color.sg_danger, bold = true))
-                c.add(ui.text(App.callMessage ?: "The provider phone could not start the call.", 14f, R.color.sg_text), top = 4)
-                val r = LinearLayout(this)
-                r.orientation = LinearLayout.HORIZONTAL
-                r.addWeighted(ui.button("TRY AGAIN", null, Ui.Kind.PRIMARY, enabled = connected) { App.placeCall() })
-                r.addWeighted(ui.button("Dismiss", null, Ui.Kind.SECONDARY) { App.dismissCall() }, 10)
-                c.add(r, top = 12)
-                content.add(c, top = 12)
-            }
-            App.CallUi.READY -> {
-            }
-        }
-
-        if (!busy) {
-            val grid = column()
-            for (rowKeys in listOf("123", "456", "789", "*0#")) {
-                val r = LinearLayout(this)
-                r.orientation = LinearLayout.HORIZONTAL
-                for (ch in rowKeys) {
-                    r.addView(
-                        keyView(ch),
-                        LinearLayout.LayoutParams(0, ui.dp(64), 1f).apply { setMargins(ui.dp(5), ui.dp(5), ui.dp(5), ui.dp(5)) }
-                    )
-                }
-                grid.addView(r, LinearLayout.LayoutParams(MATCH, WRAP))
-            }
-            content.add(grid, top = 8)
-
-            val canCall = connected && Proto.cleanNumber(App.dial) != null
-            content.add(ui.button("CALL", R.drawable.ic_call, Ui.Kind.CALL, enabled = canCall) { App.placeCall() }, top = 12)
-        }
-        audioNote()
-    }
-
-    private fun keyView(ch: Char): View {
-        val k = column()
-        k.gravity = Gravity.CENTER
-        k.background = ui.clickableBg(ui.color(R.color.sg_surface), 18, ui.color(R.color.sg_outline))
-        k.isClickable = true
-        k.isFocusable = true
-        k.contentDescription = when (ch) {
-            '*' -> "star"
-            '#' -> "pound"
-            else -> ch.toString()
-        }
-        k.addView(ui.text(ch.toString(), 26f, bold = true, center = true))
-        if (ch == '0') {
-            k.addView(ui.text("+", 11f, R.color.sg_text_dim, center = true))
-            k.setOnLongClickListener {
-                App.dialPress('+')
-                true
-            }
-        }
-        k.setOnClickListener { App.dialPress(ch) }
-        return k
-    }
-
-    // ---- CLIENT: sms -----------------------------------------------------------------------
-
-    private fun input(hint: String, value: String, type: Int, lines: Int, onChange: (String) -> Unit): EditText {
+    internal fun input(hint: String, value: String, type: Int, lines: Int, onChange: (String) -> Unit): EditText {
         val e = EditText(this)
         e.hint = hint
         e.setText(value)
@@ -1023,11 +888,28 @@ class MainActivity : Activity() {
         return e
     }
 
-    private fun smsScreen() {
-        header("SMS", "Sent from the gateway phone's SIM") { go(App.Screen.HUB) }
-        connectionStrip()
+    internal fun noticeBanner() {
+        val n = App.notice ?: return
+        val c = ui.card(14)
+        c.background = ui.rounded(ui.color(R.color.sg_surface), 16, ui.color(R.color.sg_warning), 2)
+        c.addView(ui.text(n, 14f, R.color.sg_text))
+        content.add(c, top = 12)
+    }
+
+    internal fun audioNote() {
+        content.add(
+            ui.text(
+                "Calls are placed and controlled through the SIM phone. Their voice audio stays on that phone " +
+                    "for now: Android doesn't let apps carry cellular call audio over Wi-Fi.",
+                12f, R.color.sg_text_dim
+            ),
+            top = 12
+        )
+    }
+
+    internal fun smsScreen() {
+        header("Messages", "Sent from the gateway phone's SIM") { go(App.Screen.CLIENT) }
         noticeBanner()
-        incomingBanner()
         val connected = App.connState == ConnectionManager.State.CONNECTED
 
         content.add(ui.text("To", 13f, R.color.sg_text_dim, bold = true), top = 16)
@@ -1056,7 +938,7 @@ class MainActivity : Activity() {
 
         content.add(
             ui.button(
-                if (App.smsSending) "Sending\u2026" else "SEND SMS", R.drawable.ic_send, Ui.Kind.PRIMARY,
+                if (App.smsSending) "Sending\u2026" else "SEND", R.drawable.ic_send, Ui.Kind.PRIMARY,
                 enabled = connected && !App.smsSending
             ) {
                 currentFocus?.clearFocus()
@@ -1074,10 +956,8 @@ class MainActivity : Activity() {
         )
     }
 
-    // ---- LOG -------------------------------------------------------------------------------
-
-    private fun logScreen() {
-        header("Activity log", "Numbers are masked; messages are never stored") { go(App.logReturn) }
+    internal fun logScreen() {
+        header("Diagnostics", "Technical activity; numbers are masked and messages are never stored") { go(App.logReturn) }
         val entries = EventLog.snapshot()
         if (entries.isEmpty()) {
             val c = ui.card(24)

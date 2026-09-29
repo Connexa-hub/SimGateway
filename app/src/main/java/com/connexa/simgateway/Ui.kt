@@ -39,6 +39,12 @@ class Ui(private val ctx: Context) {
         return RippleDrawable(ColorStateList.valueOf(color(R.color.sg_ripple)), content, mask)
     }
 
+    fun ovalClickableBg(fill: Int): Drawable {
+        val content = oval(fill)
+        val mask = oval(Color.WHITE)
+        return RippleDrawable(ColorStateList.valueOf(color(R.color.sg_ripple)), content, mask)
+    }
+
     fun oval(fill: Int): GradientDrawable {
         val g = GradientDrawable()
         g.shape = GradientDrawable.OVAL

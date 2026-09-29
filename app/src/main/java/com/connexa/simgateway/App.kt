@@ -12,7 +12,8 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 object App {
 
-    enum class Screen { HOME, PROVIDER, SEARCH, CONNECTING, HUB, DIALER, SMS, LOG }
+    enum class Screen { ONBOARDING, HOME, PROVIDER, SEARCH, CONNECTING, CLIENT, CALLING, SMS, LOG, SETTINGS }
+    enum class ClientTab { RECENTS, CONTACTS, DIAL, MESSAGES }
     enum class CallUi { READY, DIALING, IN_CALL, ENDING, ENDED, FAILED }
 
     class PinPrompt(val gateway: Discovery.Gateway, val reason: String?)
@@ -28,6 +29,10 @@ object App {
     var screen = Screen.HOME
     var launchHandled = false
     var logReturn = Screen.HOME
+    var settingsReturn = Screen.HOME
+    var clientTab = ClientTab.RECENTS
+    var callReturnTab = ClientTab.DIAL
+    var callerNameCache: String? = null
     var gateways: List<Discovery.Gateway> = emptyList()
     var searching = false
     var searchTimedOut = false
@@ -73,7 +78,43 @@ object App {
         val d = Discovery(ctx.applicationContext)
         d.listener = discListener
         discoveryInstance = d
+
+        screen = when {
+            !Prefs.onboardingDone(ctx) -> Screen.ONBOARDING
+            Prefs.appMode(ctx) == "provider" -> Screen.PROVIDER
+            Prefs.appMode(ctx) == "client" -> Screen.CLIENT
+            else -> Screen.HOME
+        }
     }
+
+    fun finishOnboarding() {
+        Prefs.setOnboardingDone(ctx())
+        screen = Screen.HOME
+        changed()
+    }
+
+    /** Locks the app into a role. Reachable again only through Settings > Switch mode. */
+    fun chooseMode(mode: String) {
+        Prefs.setAppMode(ctx(), mode)
+        screen = if (mode == "provider") Screen.PROVIDER else Screen.CLIENT
+        if (mode == "client") ContactsStore.invalidate()
+        changed()
+    }
+
+    /** Called from Settings: stops whatever is currently running and returns to the role picker. */
+    fun switchMode() {
+        if (GatewayState.status != GatewayState.Status.STOPPED) appContext?.let { GatewayService.stop(it) }
+        discoveryInstance?.stop()
+        reconnectKey = null
+        if (connState != ConnectionManager.State.DISCONNECTED) connection.disconnect()
+        clearLiveCall()
+        Prefs.setAppMode(ctx(), null)
+        screen = Screen.HOME
+        changed()
+    }
+
+    /** True once a mode is locked in: back-navigation must not surface Screen.HOME any more. */
+    fun modeLocked(): Boolean = Prefs.appMode(ctx()) != null
 
     private fun ctx(): Context = appContext!!
     private fun discovery(): Discovery = discoveryInstance!!
@@ -98,7 +139,7 @@ object App {
             when (state) {
                 ConnectionManager.State.CONNECTED -> {
                     Prefs.setClientPin(ctx(), pendingPin)
-                    if (screen == Screen.CONNECTING || screen == Screen.SEARCH) screen = Screen.HUB
+                    if (screen == Screen.CONNECTING || screen == Screen.SEARCH) screen = Screen.CLIENT
                     EventLog.add("Connected to $gatewayName")
                     syncStatus()
                 }
@@ -116,6 +157,7 @@ object App {
                         EventLog.add("Disconnected from gateway")
                     }
                     clearLiveCall()
+                    if (screen == Screen.CALLING) screen = Screen.CLIENT
                     if (screen == Screen.CONNECTING && detail == "unreachable") {
                         screen = Screen.SEARCH
                         discovery().start()
@@ -139,6 +181,10 @@ object App {
                 Proto.INCOMING_CALL -> {
                     if (incomingNumber == null) EventLog.add("Incoming call")
                     incomingNumber = message.optString("number", "")
+                    if (screen == Screen.CLIENT || screen == Screen.SMS) {
+                        callReturnTab = clientTab
+                        screen = Screen.CALLING
+                    }
                 }
                 Proto.CALL_STATE -> applyRemoteCall(message.optString("state"), message.optString("number"))
             }
@@ -192,12 +238,13 @@ object App {
         changed()
     }
 
-    fun leaveClient() {
+    /** Cancels an in-progress search/connect and returns to the client tab shell (not Home). */
+    fun cancelSearchToClient() {
         discovery().stop()
         reconnectKey = null
-        connection.disconnect()
+        if (connState != ConnectionManager.State.CONNECTED) connection.disconnect()
         clearLiveCall()
-        screen = Screen.HOME
+        screen = Screen.CLIENT
         changed()
     }
 
@@ -286,6 +333,7 @@ object App {
     }
 
     private fun applyRemoteCall(state: String, number: String) {
+        val wasRinging = incomingNumber != null
         when (state) {
             "ringing" -> {
                 incomingNumber = if (number.isNotEmpty()) number else (incomingNumber ?: "")
@@ -294,9 +342,19 @@ object App {
                 incomingNumber = null
                 callUi = CallUi.IN_CALL
                 if (number.isNotEmpty()) callNumber = number
+                if (wasRinging) {
+                    val n = if (number.isNotEmpty()) number else callNumber
+                    CallHistory.add(ctx(), n, ContactsStore.nameFor(n), CallHistory.Type.INCOMING)
+                    EventLog.add("Call answered")
+                }
             }
             else -> {
                 val wasActive = callUi == CallUi.DIALING || callUi == CallUi.IN_CALL || callUi == CallUi.ENDING
+                if (wasRinging && callUi != CallUi.IN_CALL) {
+                    val n = incomingNumber ?: ""
+                    if (n.isNotEmpty()) CallHistory.add(ctx(), n, ContactsStore.nameFor(n), CallHistory.Type.MISSED)
+                    EventLog.add("Missed call")
+                }
                 incomingNumber = null
                 if (wasActive) {
                     callUi = CallUi.ENDED
@@ -317,6 +375,10 @@ object App {
         val r = Runnable {
             if (callUi == CallUi.ENDED) {
                 callUi = CallUi.READY
+                if (screen == Screen.CALLING) {
+                    screen = Screen.CLIENT
+                    clientTab = callReturnTab
+                }
                 changed()
             }
         }
@@ -343,27 +405,42 @@ object App {
     fun dismissCall() {
         callUi = CallUi.READY
         callMessage = null
+        if (screen == Screen.CALLING) {
+            screen = Screen.CLIENT
+            clientTab = callReturnTab
+        }
         changed()
     }
 
+    /** Starts a call to the currently typed number. Used by the dial pad. */
     fun placeCall() {
-        if (connState != ConnectionManager.State.CONNECTED) {
-            callFailed("not_connected")
-            return
-        }
         val n = Proto.cleanNumber(dial)
         if (n == null) {
             callFailed("invalid_number")
             return
         }
+        placeCallTo(n)
+    }
+
+    /** Starts a call to a specific number, e.g. tapping a contact or a recent-call row. */
+    fun placeCallTo(number: String) {
+        if (connState != ConnectionManager.State.CONNECTED) {
+            callFailed("not_connected")
+            return
+        }
+        val n = Proto.cleanNumber(number) ?: run { callFailed("invalid_number"); return }
+        dial = n
         callUi = CallUi.DIALING
         callNumber = n
         callMessage = null
+        callReturnTab = clientTab
+        screen = Screen.CALLING
         changed()
         EventLog.add("Call request sent to ${EventLog.mask(n)}")
         connection.request(Proto.CALL, mapOf("number" to n), 10000) { r ->
             if (r.ok) {
                 EventLog.add("Call started")
+                CallHistory.add(ctx(), n, ContactsStore.nameFor(n), CallHistory.Type.OUTGOING)
                 val tracking = r.message?.optBoolean("tracking", true) ?: true
                 if (!tracking && callUi == CallUi.DIALING) callUi = CallUi.IN_CALL
                 changed()
@@ -399,9 +476,15 @@ object App {
     }
 
     fun reject() {
+        val n = incomingNumber.orEmpty()
         connection.request(Proto.REJECT) { r ->
             if (r.ok) {
+                if (n.isNotEmpty()) CallHistory.add(ctx(), n, ContactsStore.nameFor(n), CallHistory.Type.MISSED)
                 incomingNumber = null
+                if (callUi == CallUi.READY && screen == Screen.CALLING) {
+                    screen = Screen.CLIENT
+                    clientTab = callReturnTab
+                }
                 changed()
             } else {
                 showNotice(friendly(r.error))
@@ -464,7 +547,7 @@ object App {
     fun friendly(code: String?): String = when (code) {
         "invalid_number" -> "That phone number doesn't look valid."
         "invalid_message" -> "That message is empty or too long."
-        "permission_denied" -> "The gateway phone hasn't allowed this yet. Open SIM Gateway on that phone and grant permissions."
+        "permission_denied" -> "The gateway phone hasn't allowed this yet. Open LinkSIM on that phone and grant permissions."
         "busy" -> "The gateway phone is already on a call."
         "no_sim" -> "The gateway phone has no working SIM."
         "telephony_unavailable" -> "Phone service isn't available on the gateway phone."

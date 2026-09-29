@@ -8,7 +8,7 @@ object Proto {
     const val VERSION = 1
     const val PORT = 8765
     const val SERVICE_TYPE = "_simgateway._tcp."
-    const val SERVICE_NAME = "SIM Gateway"
+    const val SERVICE_NAME = "LinkSIM"
 
     const val HELLO = "hello"
     const val AUTH = "auth"

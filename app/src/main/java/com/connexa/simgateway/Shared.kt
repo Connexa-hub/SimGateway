@@ -82,6 +82,13 @@ object Prefs {
     fun clientPin(ctx: Context): String? = sp(ctx).getString("client_pin", null)
     fun setClientPin(ctx: Context, pin: String) { sp(ctx).edit().putString("client_pin", pin).apply() }
     fun clearClientPin(ctx: Context) { sp(ctx).edit().remove("client_pin").apply() }
+
+    /** "provider", "client" or null if no mode has been chosen yet. */
+    fun appMode(ctx: Context): String? = sp(ctx).getString("app_mode", null)
+    fun setAppMode(ctx: Context, mode: String?) { sp(ctx).edit().putString("app_mode", mode).apply() }
+
+    fun onboardingDone(ctx: Context): Boolean = sp(ctx).getBoolean("onboarding_done", false)
+    fun setOnboardingDone(ctx: Context) { sp(ctx).edit().putBoolean("onboarding_done", true).apply() }
 }
 
 /** "ready", "absent", "unknown" or "not_ready". Needs no permission. */

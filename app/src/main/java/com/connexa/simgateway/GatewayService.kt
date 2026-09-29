@@ -656,7 +656,7 @@ class GatewayService : Service() {
     // ---- notification ----------------------------------------------------------------------
 
     private fun createChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, "SIM Gateway", NotificationManager.IMPORTANCE_LOW)
+        val channel = NotificationChannel(CHANNEL_ID, "LinkSIM", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
@@ -672,7 +672,7 @@ class GatewayService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val b = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("SIM Gateway")
+            .setContentTitle("LinkSIM")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_sim_card)
             .setOngoing(true)
