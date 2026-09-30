@@ -30,6 +30,7 @@ object Proto {
     const val CALL_STATE = "call_state"
     const val SMS = "sms"
     const val SMS_SENT = "sms_sent"
+    const val SMS_INCOMING = "sms_incoming"
     const val ERROR = "error"
 
     fun newId(): String = UUID.randomUUID().toString().substring(0, 8)

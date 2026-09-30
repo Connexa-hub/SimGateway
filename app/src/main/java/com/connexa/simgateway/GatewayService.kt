@@ -88,6 +88,7 @@ class GatewayService : Service() {
     private var regListener: NsdManager.RegistrationListener? = null
     private var lastNsdRegisterAt = 0L
     private var phoneReceiver: BroadcastReceiver? = null
+    private var smsReceiver: BroadcastReceiver? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -130,6 +131,7 @@ class GatewayService : Service() {
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         acquireLocks()
         registerPhoneReceiver()
+        registerSmsReceiver()
         registerNetworkCallback()
         startServer()
     }
@@ -143,6 +145,8 @@ class GatewayService : Service() {
             ACTION_REFRESH -> {
                 unregisterPhoneReceiver()
                 registerPhoneReceiver()
+                unregisterSmsReceiver()
+                registerSmsReceiver()
             }
         }
         return START_STICKY
@@ -154,6 +158,7 @@ class GatewayService : Service() {
         stopping = true
         unregisterNsd()
         unregisterPhoneReceiver()
+        unregisterSmsReceiver()
         try {
             netCallback?.let { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) }
         } catch (_: Exception) {
@@ -272,6 +277,7 @@ class GatewayService : Service() {
                     GatewayState.changed()
                     EventLog.add("Device disconnected")
                     refreshNotification()
+                    if (sessions.none { it.authed }) registerNsd()
                 }
             }
         }
@@ -320,6 +326,10 @@ class GatewayService : Service() {
                 send(Proto.err(id, "locked"))
                 return false
             }
+            if (sessions.any { it !== this && it.authed }) {
+                send(Proto.err(id, "gateway_busy"))
+                return false
+            }
             val expected = Prefs.providerPin(applicationContext)
             if (MessageDigest.isEqual(given.toByteArray(Charsets.UTF_8), expected.toByteArray(Charsets.UTF_8))) {
                 synchronized(this@GatewayService) { failedAuth = 0 }
@@ -330,6 +340,10 @@ class GatewayService : Service() {
                 GatewayState.changed()
                 EventLog.add("Device connected")
                 refreshNotification()
+                // Exclusive pairing: once a client is in, stop advertising to other phones.
+                unregisterNsd()
+                GatewayState.discovery = "Hidden while a phone is connected"
+                GatewayState.changed()
                 return true
             }
             synchronized(this@GatewayService) {
@@ -517,6 +531,54 @@ class GatewayService : Service() {
     private fun unregisterPhoneReceiver() {
         val r = phoneReceiver ?: return
         phoneReceiver = null
+        try {
+            unregisterReceiver(r)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun registerSmsReceiver() {
+        if (smsReceiver != null) return
+        if (!granted(Manifest.permission.RECEIVE_SMS)) {
+            EventLog.add("Incoming-message relay off (permission not granted)")
+            return
+        }
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent == null) return
+                try {
+                    val messages = android.provider.Telephony.Sms.Intents.getMessagesFromIntent(intent)
+                    if (messages.isNullOrEmpty()) return
+                    val sender = messages[0].originatingAddress ?: return
+                    val body = messages.joinToString("") { it.messageBody ?: "" }
+                    if (body.isBlank()) return
+                    EventLog.add("Message received from ${EventLog.mask(sender)}")
+                    broadcast(Proto.build(Proto.SMS_INCOMING) {
+                        put("number", sender)
+                        put("message", body)
+                        put("time", System.currentTimeMillis())
+                    })
+                } catch (e: Exception) {
+                    Log.e(TAG, "sms receive parse failed", e)
+                }
+            }
+        }
+        val filter = IntentFilter(android.provider.Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(r, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                registerReceiver(r, filter)
+            }
+            smsReceiver = r
+        } catch (e: Exception) {
+            Log.e(TAG, "registerReceiver (sms) failed", e)
+        }
+    }
+
+    private fun unregisterSmsReceiver() {
+        val r = smsReceiver ?: return
+        smsReceiver = null
         try {
             unregisterReceiver(r)
         } catch (_: Exception) {

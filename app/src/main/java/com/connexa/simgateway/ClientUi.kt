@@ -16,50 +16,22 @@ import java.util.Locale
 private const val MATCH = MainActivity.MATCH
 private const val WRAP = MainActivity.WRAP
 
-// ---- top-level client shell (tab bar lives outside the scroll view, pinned to the bottom) ----
+// ---- top-level client shell ---------------------------------------------------------------
 
 internal fun MainActivity.clientScreen() {
-    val bar = row()
-    val logo = FrameLayout(this)
-    logo.background = ui.rounded(ui.color(R.color.sg_primary), 12)
-    logo.addView(ui.icon(R.drawable.ic_sim_card, R.color.sg_on_primary), FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER))
-    bar.addView(logo, LinearLayout.LayoutParams(ui.dp(38), ui.dp(38)))
-    bar.addView(ui.text("LinkSIM", 18f, bold = true), LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(10) })
-    val spacer = View(this)
-    bar.addView(spacer, LinearLayout.LayoutParams(0, 1, 1f))
-    val msgBtn = FrameLayout(this)
-    msgBtn.isClickable = true
-    msgBtn.isFocusable = true
-    msgBtn.contentDescription = "Messages"
-    msgBtn.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 20)
-    msgBtn.addView(ui.icon(R.drawable.ic_message, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.CENTER))
-    msgBtn.setOnClickListener { go(App.Screen.SMS) }
-    bar.addView(msgBtn, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
-    val gear = FrameLayout(this)
-    gear.isClickable = true
-    gear.isFocusable = true
-    gear.contentDescription = "Settings"
-    gear.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 20)
-    gear.addView(ui.icon(R.drawable.ic_settings, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.CENTER))
-    gear.setOnClickListener {
-        App.settingsReturn = App.Screen.CLIENT
-        go(App.Screen.SETTINGS)
-    }
-    bar.addView(gear, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
-    content.add(bar, top = 4)
-
     val connected = App.connState == ConnectionManager.State.CONNECTED
-    if (connected) {
-        val strip = row()
-        strip.setPadding(ui.dp(12), ui.dp(9), ui.dp(12), ui.dp(9))
-        strip.background = ui.rounded(ui.color(R.color.sg_surface_alt), 14)
-        strip.addView(ui.dot(R.color.sg_success, 9))
-        strip.addView(
-            ui.text("Connected to ${App.gatewayName}", 13f, R.color.sg_text, bold = true),
-            LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(8) }
+    statusHeader(
+        online = connected, showSearch = true, searchHint = "Search ${if (App.clientTab == App.ClientTab.CONTACTS) "contacts" else "recents"}",
+        menuItems = listOf(
+            "Messages" to { go(App.Screen.MESSAGES) },
+            "Settings" to {
+                App.settingsReturn = App.Screen.CLIENT
+                go(App.Screen.SETTINGS)
+            }
         )
-        content.add(strip, top = 14)
-    } else {
+    )
+
+    if (!connected) {
         val c = ui.card(16)
         val (title, sub) = when (App.connState) {
             ConnectionManager.State.CONNECTING, ConnectionManager.State.AUTHENTICATING -> "Connecting\u2026" to "Reaching the gateway phone"
@@ -77,66 +49,103 @@ internal fun MainActivity.clientScreen() {
     }
     noticeBanner()
 
+    if (App.pickingRecipient) {
+        App.clientTab = App.ClientTab.CONTACTS
+        val c = ui.card(14)
+        c.background = ui.rounded(ui.color(R.color.sg_surface), 16, ui.color(R.color.sg_primary), 2)
+        c.addView(ui.text("Choose a contact to message", 14f, R.color.sg_text, bold = true))
+        content.add(c, top = 12)
+    }
+
+    segmentedToggle()
+
     when (App.clientTab) {
         App.ClientTab.RECENTS -> recentsTab()
         App.ClientTab.CONTACTS -> contactsTab()
-        App.ClientTab.DIAL -> dialTab(connected)
-        App.ClientTab.MESSAGES -> { /* reached only via the message icon, which routes to Screen.SMS */ }
     }
 
-    clientBottomTabBar()
+    if (App.pickingRecipient) return
+    when (App.clientTab) {
+        App.ClientTab.RECENTS -> setFab(R.drawable.ic_dialpad, "Open dialpad") { go(App.Screen.DIALPAD) }
+        App.ClientTab.CONTACTS -> setFab(R.drawable.ic_plus, "Add contact") {
+            App.editingContact = null
+            go(App.Screen.CONTACT_EDIT)
+        }
+    }
 }
 
-internal fun MainActivity.clientBottomTabBar() {
-    val wrap = column()
-    val divider = View(this)
-    divider.setBackgroundColor(ui.color(R.color.sg_outline))
-    wrap.addView(divider, LinearLayout.LayoutParams(MATCH, 1))
-
-    val bar = row()
-    bar.setPadding(ui.dp(4), ui.dp(8), ui.dp(4), ui.dp(8))
-    bar.setBackgroundColor(ui.color(R.color.sg_surface))
-
-    val tabs = listOf(
-        Triple(App.ClientTab.RECENTS, R.drawable.ic_history, "Recents"),
-        Triple(App.ClientTab.CONTACTS, R.drawable.ic_person, "Contacts"),
-        Triple(App.ClientTab.DIAL, R.drawable.ic_dialpad, "Dial")
-    )
-    for ((tab, icon, label) in tabs) {
-        val active = App.clientTab == tab
+/** Top-left switch-style toggle between Recents and Contacts (Infinix XOS style). */
+internal fun MainActivity.segmentedToggle() {
+    val wrap = row()
+    wrap.setPadding(ui.dp(3), ui.dp(3), ui.dp(3), ui.dp(3))
+    wrap.background = ui.rounded(ui.color(R.color.sg_surface_alt), 16)
+    for (tab in listOf(App.ClientTab.RECENTS to "Recents", App.ClientTab.CONTACTS to "Contacts")) {
+        val active = App.clientTab == tab.first
         val item = column()
         item.gravity = Gravity.CENTER
-        item.setPadding(0, ui.dp(6), 0, ui.dp(2))
+        item.setPadding(0, ui.dp(9), 0, ui.dp(9))
         item.isClickable = true
         item.isFocusable = true
-        item.contentDescription = label
-        item.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 12)
-        item.addView(
-            ui.icon(icon, if (active) R.color.sg_primary else R.color.sg_text_dim),
-            LinearLayout.LayoutParams(ui.dp(23), ui.dp(23))
-        )
-        item.add(ui.text(label, 11f, if (active) R.color.sg_primary else R.color.sg_text_dim, bold = active, center = true), top = 4)
+        item.background = if (active) ui.rounded(ui.color(R.color.sg_surface), 13) else ui.clickableBg(android.graphics.Color.TRANSPARENT, 13)
+        item.addView(ui.text(tab.second, 14f, if (active) R.color.sg_primary else R.color.sg_text_dim, bold = active, center = true))
         item.setOnClickListener {
-            App.clientTab = tab
+            App.clientTab = tab.first
+            App.searchActive = false
+            App.searchQuery = ""
             App.changed()
         }
-        bar.addWeighted(item)
+        wrap.addWeighted(item)
     }
-    wrap.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
-    bottomBar.addView(wrap, FrameLayout.LayoutParams(MATCH, WRAP))
+    content.add(wrap, top = 14)
 }
 
-// ---- RECENTS (native-style call log, swipe left/right to delete) -----------------------------
+// ---- RECENTS (native-style call log: device Call Log merged with app-tracked calls) --------
 
 internal fun MainActivity.recentsTab() {
-    content.add(ui.text("Recents", 19f, bold = true), top = 18)
-    val entries = CallHistory.snapshot(this)
+    if (!isGranted(Manifest.permission.READ_CALL_LOG)) {
+        val c = ui.card(14)
+        c.addView(ui.text("See this phone's full call history", 14f, bold = true))
+        c.add(ui.text("Allow call log access to include calls made outside LinkSIM here too.", 12f, R.color.sg_text_dim), top = 3)
+        c.add(ui.button("Allow", null, Ui.Kind.SECONDARY) {
+            requestPermissions(arrayOf(Manifest.permission.READ_CALL_LOG), MainActivity.REQ_CALL_LOG)
+        }, top = 10)
+        content.add(c, top = 16)
+    }
+    val filterBar = row()
+    for (f in listOf(App.RecentsFilter.ALL to "All", App.RecentsFilter.MISSED to "Missed")) {
+        val active = App.recentsFilter == f.first
+        val item = column()
+        item.gravity = Gravity.CENTER
+        item.isClickable = true
+        item.isFocusable = true
+        val label = ui.text(f.second, 14f, if (active) R.color.sg_primary else R.color.sg_text_dim, bold = active)
+        item.addView(label)
+        val underline = View(this)
+        underline.setBackgroundColor(ui.color(if (active) R.color.sg_primary else android.R.color.transparent))
+        item.add(underline, top = 6, height = ui.dp(2))
+        item.setOnClickListener {
+            App.recentsFilter = f.first
+            App.changed()
+        }
+        item.setPadding(ui.dp(4), ui.dp(6), ui.dp(16), 0)
+        filterBar.addView(item, LinearLayout.LayoutParams(WRAP, WRAP))
+    }
+    content.add(filterBar, top = 16)
+
+    var entries = CallHistory.merged(this)
+    if (App.recentsFilter == App.RecentsFilter.MISSED) entries = entries.filter { it.type == CallHistory.Type.MISSED }
+    if (App.searchActive && App.searchQuery.isNotBlank()) {
+        val q = App.searchQuery.trim().lowercase()
+        entries = entries.filter { (it.name ?: it.number).lowercase().contains(q) || it.number.contains(q) }
+    }
+
     if (entries.isEmpty()) {
         val c = ui.card(24)
         c.gravity = Gravity.CENTER_HORIZONTAL
         c.addView(circleIcon(R.drawable.ic_history, 60, 28, ui.color(R.color.sg_surface_alt), R.color.sg_text_dim))
-        c.add(ui.text("No calls yet", 17f, R.color.sg_text, bold = true, center = true), top = 12)
-        c.add(ui.text("Calls you make or receive through the gateway will show up here.", 13f, R.color.sg_text_dim, center = true), top = 4)
+        val emptyText = if (App.recentsFilter == App.RecentsFilter.MISSED) "No missed calls" else "No calls yet"
+        c.add(ui.text(emptyText, 17f, R.color.sg_text, bold = true, center = true), top = 12)
+        c.add(ui.text("Calls made or received on this phone show up here.", 13f, R.color.sg_text_dim, center = true), top = 4)
         content.add(c, top = 14)
     } else {
         for (e in entries) content.add(callLogRow(e), top = 10)
@@ -205,12 +214,12 @@ private fun MainActivity.callLogRow(e: CallHistory.Entry): View {
     fg.addView(callBtn, LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)).apply { marginStart = ui.dp(8) })
 
     wrap.addView(fg, FrameLayout.LayoutParams(MATCH, WRAP))
-    attachSwipeToDelete(fg) { CallHistory.remove(this, e.id) }
+    attachSwipeToDelete(fg) { CallHistory.removeMerged(this, e.id) }
     return wrap
 }
 
 /** Lightweight swipe-to-delete: drag left or right past a threshold to remove the row. */
-private fun MainActivity.attachSwipeToDelete(target: View, onDelete: () -> Unit) {
+internal fun MainActivity.attachSwipeToDelete(target: View, onDelete: () -> Unit) {
     val slop = ViewConfiguration.get(this).scaledTouchSlop
     val threshold = ui.dp(96)
     var downX = 0f
@@ -267,10 +276,9 @@ private fun MainActivity.attachSwipeToDelete(target: View, onDelete: () -> Unit)
     }
 }
 
-// ---- CONTACTS (device contacts, requested lazily; tap to call or message) --------------------
+// ---- CONTACTS (device contacts, alphabetical, requested lazily) ----------------------------
 
 internal fun MainActivity.contactsTab() {
-    content.add(ui.text("Contacts", 19f, bold = true), top = 18)
     if (!isGranted(Manifest.permission.READ_CONTACTS)) {
         val c = ui.card(24)
         c.gravity = Gravity.CENTER_HORIZONTAL
@@ -281,9 +289,9 @@ internal fun MainActivity.contactsTab() {
             top = 4
         )
         c.add(ui.button("Allow contacts access", null, Ui.Kind.PRIMARY) {
-            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), MainActivity.REQ_CONTACTS)
+            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS), MainActivity.REQ_CONTACTS)
         }, top = 16)
-        content.add(c, top = 14)
+        content.add(c, top = 16)
         return
     }
     if (contactsLoading) {
@@ -292,24 +300,56 @@ internal fun MainActivity.contactsTab() {
         content.add(pb, top = 40, height = ui.dp(48))
         return
     }
-    val list = ContactsStore.cached()
+    var list = ContactsStore.cached()
     if (list.isEmpty()) {
         loadContacts()
         content.add(ui.text("Loading contacts\u2026", 14f, R.color.sg_text_dim, center = true), top = 30)
         return
     }
-    for (contact in list) content.add(contactRow(contact), top = 8)
+    if (App.searchActive && App.searchQuery.isNotBlank()) {
+        val q = App.searchQuery.trim().lowercase()
+        list = list.filter { it.name.lowercase().contains(q) || it.number.contains(q) }
+    }
+    if (list.isEmpty()) {
+        content.add(ui.text("No contacts match your search.", 14f, R.color.sg_text_dim, center = true), top = 30)
+        return
+    }
+    var lastLetter = ""
+    for (contact in list) {
+        val letter = contact.name.trim().take(1).uppercase().ifEmpty { "#" }
+        if (letter != lastLetter) {
+            lastLetter = letter
+            content.add(ui.text(letter, 13f, R.color.sg_primary, bold = true), top = 18)
+        }
+        content.add(contactRow(contact), top = 8)
+    }
 }
 
 private fun MainActivity.contactRow(c: Contact): View {
     val r = row()
     r.setPadding(ui.dp(14), ui.dp(10), ui.dp(14), ui.dp(10))
     r.background = ui.rounded(ui.color(R.color.sg_surface), 16, ui.color(R.color.sg_outline))
-    r.addView(avatarCircle(c.name, 42))
-    val col = column()
-    col.addView(ui.text(c.name, 15f, bold = true))
-    col.add(ui.text(c.number, 13f, R.color.sg_text_dim), top = 2)
-    r.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(12) })
+    val onTap: () -> Unit = {
+        if (App.pickingRecipient) {
+            App.pickingRecipient = false
+            App.openConversation(c.number)
+        } else {
+            App.openContact = c
+            go(App.Screen.CONTACT_INFO)
+        }
+    }
+    val avatar = avatarCircle(c.name, 42)
+    avatar.isClickable = true
+    avatar.contentDescription = "${c.name} details"
+    avatar.setOnClickListener { onTap() }
+    r.addView(avatar)
+    val infoCol = column()
+    infoCol.isClickable = true
+    infoCol.setOnClickListener { onTap() }
+    infoCol.addView(ui.text(c.name, 15f, bold = true))
+    infoCol.add(ui.text(c.number, 13f, R.color.sg_text_dim), top = 2)
+    r.addView(infoCol, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(12) })
+    if (App.pickingRecipient) return r
     val call = circleIcon(R.drawable.ic_call, 38, 17, ui.color(R.color.sg_success), R.color.sg_on_call)
     call.isClickable = true
     call.contentDescription = "Call ${c.name}"
@@ -318,17 +358,17 @@ private fun MainActivity.contactRow(c: Contact): View {
     val msg = circleIcon(R.drawable.ic_message, 38, 17, ui.color(R.color.sg_primary), R.color.sg_on_primary)
     msg.isClickable = true
     msg.contentDescription = "Message ${c.name}"
-    msg.setOnClickListener {
-        App.smsNumber = c.number
-        go(App.Screen.SMS)
-    }
+    msg.setOnClickListener { App.openConversation(c.number) }
     r.addView(msg, LinearLayout.LayoutParams(ui.dp(38), ui.dp(38)).apply { marginStart = ui.dp(8) })
     return r
 }
 
-// ---- DIAL (keypad tab) -------------------------------------------------------------------
+// ---- DIALPAD (standalone screen, opened from the Recents FAB) ------------------------------
 
-internal fun MainActivity.dialTab(connected: Boolean) {
+internal fun MainActivity.dialpadScreen() {
+    val connected = App.connState == ConnectionManager.State.CONNECTED
+    header("Dial", null) { go(App.Screen.CLIENT) }
+
     val display = row()
     display.setPadding(ui.dp(16), ui.dp(8), ui.dp(4), ui.dp(8))
     display.background = ui.rounded(ui.color(R.color.sg_surface), 20, ui.color(R.color.sg_outline))
@@ -534,7 +574,8 @@ internal fun MainActivity.settingsScreen() {
     if (mode == "client") {
         val permCard = ui.card(18)
         permCard.addView(ui.text("Permissions", 15f, bold = true))
-        permCard.add(permRow("Read contacts", isGranted(Manifest.permission.READ_CONTACTS)), top = 6)
+        permCard.add(permRow("Contacts (view & edit)", isGranted(Manifest.permission.READ_CONTACTS) && isGranted(Manifest.permission.WRITE_CONTACTS)), top = 6)
+        permCard.add(permRow("Call log", isGranted(Manifest.permission.READ_CALL_LOG)))
         content.add(permCard, top = 12)
     }
 

@@ -1,6 +1,7 @@
 package com.connexa.simgateway
 
 import android.content.Context
+import android.provider.CallLog
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.CopyOnWriteArrayList
@@ -92,4 +93,63 @@ object CallHistory {
     fun addListener(l: () -> Unit) { listeners.add(l) }
     fun removeListener(l: () -> Unit) { listeners.remove(l) }
     private fun notifyChanged() { for (l in listeners) l() }
+
+    // ---- device call log (native calls, e.g. from before LinkSIM was used) --------------------
+
+    private fun hiddenSet(ctx: Context): MutableSet<String> =
+        prefs(ctx).getStringSet("hidden_call_ids", emptySet())!!.toMutableSet()
+
+    private fun hideSystemEntry(ctx: Context, id: Long) {
+        val set = hiddenSet(ctx)
+        set.add(id.toString())
+        prefs(ctx).edit().putStringSet("hidden_call_ids", set).apply()
+    }
+
+    /** Reads the device's own Call Log (requires READ_CALL_LOG). Synthetic ids are negative. */
+    private fun systemCallLog(ctx: Context): List<Entry> {
+        val hidden = hiddenSet(ctx)
+        val out = mutableListOf<Entry>()
+        try {
+            val cursor = ctx.contentResolver.query(
+                CallLog.Calls.CONTENT_URI,
+                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME, CallLog.Calls.TYPE, CallLog.Calls.DATE),
+                null, null,
+                "${CallLog.Calls.DATE} DESC LIMIT 200"
+            )
+            cursor?.use { c ->
+                val numIdx = c.getColumnIndex(CallLog.Calls.NUMBER)
+                val nameIdx = c.getColumnIndex(CallLog.Calls.CACHED_NAME)
+                val typeIdx = c.getColumnIndex(CallLog.Calls.TYPE)
+                val dateIdx = c.getColumnIndex(CallLog.Calls.DATE)
+                while (c.moveToNext()) {
+                    val number = if (numIdx >= 0) c.getString(numIdx) else null
+                    if (number.isNullOrBlank()) continue
+                    val name = if (nameIdx >= 0) c.getString(nameIdx) else null
+                    val type = if (typeIdx >= 0) c.getInt(typeIdx) else CallLog.Calls.OUTGOING_TYPE
+                    val date = if (dateIdx >= 0) c.getLong(dateIdx) else 0L
+                    val raw = number.hashCode().toLong() * 1_000_003L + date
+                    val id = -(Math.abs(raw).coerceAtLeast(1L))
+                    if (hidden.contains(id.toString())) continue
+                    val kind = when (type) {
+                        CallLog.Calls.INCOMING_TYPE -> Type.INCOMING
+                        CallLog.Calls.MISSED_TYPE, CallLog.Calls.REJECTED_TYPE -> Type.MISSED
+                        else -> Type.OUTGOING
+                    }
+                    out.add(Entry(id, number, name, kind, date))
+                }
+            }
+        } catch (e: Exception) {
+            // No permission granted yet, or the provider is unavailable; return what we have.
+        }
+        return out
+    }
+
+    /** Device call log merged with app-tracked calls, newest first. */
+    fun merged(ctx: Context): List<Entry> =
+        (systemCallLog(ctx) + snapshot(ctx)).sortedByDescending { it.time }
+
+    /** Removes an entry regardless of source: app-tracked calls are deleted, device-log entries are hidden. */
+    fun removeMerged(ctx: Context, id: Long) {
+        if (id > 0) remove(ctx, id) else hideSystemEntry(ctx, id)
+    }
 }

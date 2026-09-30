@@ -43,15 +43,16 @@ class MainActivity : Activity() {
     companion object {
         const val REQ_PERMISSIONS = 100
         const val REQ_CONTACTS = 101
+        const val REQ_CALL_LOG = 102
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
 
     internal lateinit var ui: Ui
-    internal lateinit var root: LinearLayout
+    internal lateinit var root: FrameLayout
     internal lateinit var scroll: ScrollView
     internal lateinit var content: LinearLayout
-    internal lateinit var bottomBar: FrameLayout
+    internal lateinit var fabSlot: FrameLayout
 
     internal val handler = Handler(Looper.getMainLooper())
     internal val animators = mutableListOf<Animator>()
@@ -128,13 +129,28 @@ class MainActivity : Activity() {
             App.Screen.HOME -> super.onBackPressed()
             App.Screen.PROVIDER -> super.onBackPressed()
             App.Screen.SEARCH, App.Screen.CONNECTING -> App.cancelSearchToClient()
-            App.Screen.CLIENT -> super.onBackPressed()
+            App.Screen.CLIENT -> {
+                if (App.pickingRecipient) {
+                    App.pickingRecipient = false
+                    App.changed()
+                } else if (App.searchActive) {
+                    App.searchActive = false
+                    App.searchQuery = ""
+                    App.changed()
+                } else {
+                    super.onBackPressed()
+                }
+            }
+            App.Screen.DIALPAD -> go(App.Screen.CLIENT)
             App.Screen.CALLING -> {
-                App.screen = App.Screen.CLIENT
-                App.clientTab = App.callReturnTab
+                App.screen = App.callReturnScreen
+                if (App.screen == App.Screen.CLIENT) App.clientTab = App.callReturnTab
                 App.changed()
             }
-            App.Screen.SMS -> go(App.Screen.CLIENT)
+            App.Screen.CONTACT_INFO -> go(App.Screen.CLIENT)
+            App.Screen.CONTACT_EDIT -> go(if (App.editingContact != null) App.Screen.CONTACT_INFO else App.Screen.CLIENT)
+            App.Screen.MESSAGES -> go(App.Screen.CLIENT)
+            App.Screen.CONVERSATION -> go(App.Screen.MESSAGES)
             App.Screen.LOG -> go(App.logReturn)
             App.Screen.SETTINGS -> go(App.settingsReturn)
         }
@@ -146,9 +162,11 @@ class MainActivity : Activity() {
     }
 
     private fun buildRoot() {
-        root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
+        root = FrameLayout(this)
         root.setBackgroundColor(ui.color(R.color.sg_bg))
+
+        val column = LinearLayout(this)
+        column.orientation = LinearLayout.VERTICAL
 
         scroll = ScrollView(this)
         scroll.isFillViewport = true
@@ -159,10 +177,17 @@ class MainActivity : Activity() {
         content.setPadding(ui.dp(20), ui.dp(12), ui.dp(20), ui.dp(28))
 
         scroll.addView(content, ViewGroup.LayoutParams(MATCH, WRAP))
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        column.addView(scroll, LinearLayout.LayoutParams(MATCH, MATCH))
+        root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        bottomBar = FrameLayout(this)
-        root.addView(bottomBar, LinearLayout.LayoutParams(MATCH, WRAP))
+        fabSlot = FrameLayout(this)
+        root.addView(
+            fabSlot,
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.END).apply {
+                marginEnd = ui.dp(20)
+                bottomMargin = ui.dp(24)
+            }
+        )
 
         root.setOnApplyWindowInsetsListener { v, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
@@ -174,6 +199,21 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Shows a single circular floating action button, bottom-right. Pass null iconRes to hide it. */
+    internal fun setFab(iconRes: Int?, contentDesc: String, onClick: () -> Unit) {
+        fabSlot.removeAllViews()
+        if (iconRes == null) return
+        val fab = FrameLayout(this)
+        fab.background = ui.ovalClickableBg(ui.color(R.color.sg_primary))
+        fab.elevation = ui.dp(4).toFloat()
+        fab.isClickable = true
+        fab.isFocusable = true
+        fab.contentDescription = contentDesc
+        fab.addView(ui.icon(iconRes, R.color.sg_on_primary), FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER))
+        fab.setOnClickListener { onClick() }
+        fabSlot.addView(fab, FrameLayout.LayoutParams(ui.dp(58), ui.dp(58)))
+    }
+
     // ---- rendering helpers -----------------------------------------------------------------
 
     private fun render() {
@@ -181,7 +221,7 @@ class MainActivity : Activity() {
         uptimeLabel = null
         callTimerLabel = null
         content.removeAllViews()
-        bottomBar.removeAllViews()
+        fabSlot.removeAllViews()
         when (App.screen) {
             App.Screen.ONBOARDING -> onboardingScreen()
             App.Screen.HOME -> homeScreen()
@@ -189,8 +229,12 @@ class MainActivity : Activity() {
             App.Screen.SEARCH -> searchScreen()
             App.Screen.CONNECTING -> connectingScreen()
             App.Screen.CLIENT -> clientScreen()
+            App.Screen.DIALPAD -> dialpadScreen()
             App.Screen.CALLING -> callingScreen()
-            App.Screen.SMS -> smsScreen()
+            App.Screen.CONTACT_INFO -> contactInfoScreen()
+            App.Screen.CONTACT_EDIT -> contactEditScreen()
+            App.Screen.MESSAGES -> messagesScreen()
+            App.Screen.CONVERSATION -> conversationScreen()
             App.Screen.LOG -> logScreen()
             App.Screen.SETTINGS -> settingsScreen()
         }
@@ -276,24 +320,76 @@ class MainActivity : Activity() {
     }
 
     /** Header used on the two top-level mode screens: no back arrow, a settings gear instead. */
-    internal fun headerWithSettings(title: String, subtitle: String?, from: App.Screen) {
+    /**
+     * Header required across the top-level mode screens: left is ONLY a status dot + Online/Offline
+     * text (no wordmark, no extra text); right is a search toggle (optional) and a 3-dot overflow menu.
+     */
+    internal fun statusHeader(
+        online: Boolean,
+        showSearch: Boolean,
+        searchHint: String = "Search",
+        onSearchChanged: (String) -> Unit = {},
+        menuItems: List<Pair<String, () -> Unit>>
+    ) {
         val r = row()
-        val col = column()
-        col.addView(ui.text(title, 22f, bold = true))
-        if (subtitle != null) col.addView(ui.text(subtitle, 14f, R.color.sg_text_dim))
-        r.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
-        val gear = FrameLayout(this)
-        gear.isClickable = true
-        gear.isFocusable = true
-        gear.contentDescription = "Settings"
-        gear.background = ui.clickableBg(Color.TRANSPARENT, 24)
-        gear.addView(ui.icon(R.drawable.ic_settings, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER))
-        gear.setOnClickListener {
-            App.settingsReturn = from
-            go(App.Screen.SETTINGS)
+        r.addView(ui.dot(if (online) R.color.sg_success else R.color.sg_text_dim, 10))
+
+        if (showSearch && App.searchActive) {
+            val e = input(searchHint, App.searchQuery, InputType.TYPE_CLASS_TEXT, 1) {
+                App.searchQuery = it
+                onSearchChanged(it)
+                render()
+            }
+            e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            e.background = null
+            r.addView(e, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(10) })
+            e.requestFocus()
+            e.setSelection(e.text.length)
+        } else {
+            r.addView(
+                ui.text(if (online) "Online" else "Offline", 16f, bold = true),
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(8) }
+            )
+            val spacer = View(this)
+            r.addView(spacer, LinearLayout.LayoutParams(0, 1, 1f))
         }
-        r.addView(gear, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)))
-        content.add(r)
+
+        if (showSearch) {
+            val search = FrameLayout(this)
+            search.isClickable = true
+            search.isFocusable = true
+            search.contentDescription = "Search"
+            search.background = ui.clickableBg(Color.TRANSPARENT, 20)
+            search.addView(
+                ui.icon(if (App.searchActive) R.drawable.ic_arrow_back else R.drawable.ic_search, R.color.sg_text),
+                FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.CENTER)
+            )
+            search.setOnClickListener {
+                App.searchActive = !App.searchActive
+                if (!App.searchActive) App.searchQuery = ""
+                App.changed()
+            }
+            r.addView(search, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
+        }
+
+        val overflow = FrameLayout(this)
+        overflow.isClickable = true
+        overflow.isFocusable = true
+        overflow.contentDescription = "More options"
+        overflow.background = ui.clickableBg(Color.TRANSPARENT, 20)
+        overflow.addView(ui.icon(R.drawable.ic_more_vert, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER))
+        overflow.setOnClickListener {
+            val menu = android.widget.PopupMenu(this, overflow)
+            for ((label, _) in menuItems) menu.menu.add(label)
+            menu.setOnMenuItemClickListener { item ->
+                menuItems.firstOrNull { it.first == item.title.toString() }?.second?.invoke()
+                true
+            }
+            menu.show()
+        }
+        r.addView(overflow, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
+
+        content.add(r, top = 4)
     }
 
     internal fun infoRow(label: String, value: String, valueColor: Int = R.color.sg_text): View {
@@ -445,7 +541,8 @@ class MainActivity : Activity() {
             Manifest.permission.ANSWER_PHONE_CALLS,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.READ_CALL_LOG,
-            Manifest.permission.SEND_SMS
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.RECEIVE_SMS
         )
         if (Build.VERSION.SDK_INT >= 33) l.add(Manifest.permission.POST_NOTIFICATIONS)
         return l
@@ -468,7 +565,7 @@ class MainActivity : Activity() {
                     "\u2022 Make and end phone calls\n" +
                     "\u2022 Answer calls\n" +
                     "\u2022 See incoming calls and the caller's number\n" +
-                    "\u2022 Send text messages\n" +
+                    "\u2022 Send and receive text messages\n" +
                     "\u2022 Show the gateway notification\n\n" +
                     "Only a phone that enters this phone's PIN can use them. " +
                     "You can continue without some permissions, but those features won't work until you grant them."
@@ -502,6 +599,13 @@ class MainActivity : Activity() {
             if (isGranted(Manifest.permission.READ_CONTACTS)) {
                 loadContacts()
             } else if (!shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)) {
+                offerSettings()
+            }
+            App.changed()
+            return
+        }
+        if (requestCode == REQ_CALL_LOG) {
+            if (!isGranted(Manifest.permission.READ_CALL_LOG) && !shouldShowRequestPermissionRationale(Manifest.permission.READ_CALL_LOG)) {
                 offerSettings()
             }
             App.changed()
@@ -590,7 +694,14 @@ class MainActivity : Activity() {
     }
 
     private fun providerScreen() {
-        headerWithSettings("Provider", null, App.Screen.PROVIDER)
+        val gwOnline = GatewayState.status == GatewayState.Status.ONLINE
+        statusHeader(
+            online = gwOnline, showSearch = false,
+            menuItems = listOf("Settings" to {
+                App.settingsReturn = App.Screen.PROVIDER
+                go(App.Screen.SETTINGS)
+            })
+        )
 
         val st = GatewayState.status
         val spec = when (st) {
@@ -674,7 +785,7 @@ class MainActivity : Activity() {
                 isGranted(Manifest.permission.READ_PHONE_STATE) && isGranted(Manifest.permission.READ_CALL_LOG)
             )
         )
-        permCard.add(permRow("Send text messages", isGranted(Manifest.permission.SEND_SMS)))
+        permCard.add(permRow("Send and receive text messages", isGranted(Manifest.permission.SEND_SMS) && isGranted(Manifest.permission.RECEIVE_SMS)))
         if (missingPermissions().isNotEmpty()) {
             permCard.add(
                 ui.button("Grant permissions", null, Ui.Kind.PRIMARY) {
@@ -901,55 +1012,6 @@ class MainActivity : Activity() {
             ui.text(
                 "Calls are placed and controlled through the SIM phone. Their voice audio stays on that phone " +
                     "for now: Android doesn't let apps carry cellular call audio over Wi-Fi.",
-                12f, R.color.sg_text_dim
-            ),
-            top = 12
-        )
-    }
-
-    internal fun smsScreen() {
-        header("Messages", "Sent from the gateway phone's SIM") { go(App.Screen.CLIENT) }
-        noticeBanner()
-        val connected = App.connState == ConnectionManager.State.CONNECTED
-
-        content.add(ui.text("To", 13f, R.color.sg_text_dim, bold = true), top = 16)
-        content.add(
-            input("Phone number", App.smsNumber, InputType.TYPE_CLASS_PHONE, 1) { App.smsNumber = it },
-            top = 6
-        )
-        content.add(ui.text("Message", 13f, R.color.sg_text_dim, bold = true), top = 14)
-        val msg = input(
-            "Type your message", App.smsText,
-            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES, 5
-        ) { App.smsText = it }
-        msg.filters = arrayOf(InputFilter.LengthFilter(1000))
-        content.add(msg, top = 6)
-
-        val status = App.smsStatus
-        if (status != null) {
-            val c = ui.card(14)
-            c.background = ui.rounded(
-                ui.color(R.color.sg_surface), 16,
-                ui.color(if (App.smsOk) R.color.sg_success else R.color.sg_danger), 2
-            )
-            c.addView(ui.text(if (App.smsOk) "\u2713 $status" else "\u2715 $status", 14f, R.color.sg_text))
-            content.add(c, top = 12)
-        }
-
-        content.add(
-            ui.button(
-                if (App.smsSending) "Sending\u2026" else "SEND", R.drawable.ic_send, Ui.Kind.PRIMARY,
-                enabled = connected && !App.smsSending
-            ) {
-                currentFocus?.clearFocus()
-                App.sendSms()
-            },
-            top = 16
-        )
-        content.add(
-            ui.text(
-                "Standard carrier rates apply on the gateway phone's SIM. \"Sent\" means the gateway phone accepted " +
-                    "the message; delivery isn't confirmed.",
                 12f, R.color.sg_text_dim
             ),
             top = 12

@@ -12,8 +12,12 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 object App {
 
-    enum class Screen { ONBOARDING, HOME, PROVIDER, SEARCH, CONNECTING, CLIENT, CALLING, SMS, LOG, SETTINGS }
-    enum class ClientTab { RECENTS, CONTACTS, DIAL, MESSAGES }
+    enum class Screen {
+        ONBOARDING, HOME, PROVIDER, SEARCH, CONNECTING, CLIENT, DIALPAD, CALLING,
+        CONTACT_INFO, CONTACT_EDIT, MESSAGES, CONVERSATION, LOG, SETTINGS
+    }
+    enum class ClientTab { RECENTS, CONTACTS }
+    enum class RecentsFilter { ALL, MISSED }
     enum class CallUi { READY, DIALING, IN_CALL, ENDING, ENDED, FAILED }
 
     class PinPrompt(val gateway: Discovery.Gateway, val reason: String?)
@@ -31,8 +35,16 @@ object App {
     var logReturn = Screen.HOME
     var settingsReturn = Screen.HOME
     var clientTab = ClientTab.RECENTS
-    var callReturnTab = ClientTab.DIAL
-    var callerNameCache: String? = null
+    var recentsFilter = RecentsFilter.ALL
+    var callReturnScreen = Screen.CLIENT
+    var callReturnTab = ClientTab.RECENTS
+    var searchQuery = ""
+    var searchActive = false
+    var threadSearchQuery = ""
+    var openContact: Contact? = null
+    var editingContact: Contact? = null
+    var pickingRecipient = false
+    var conversationNumber = ""
     var gateways: List<Discovery.Gateway> = emptyList()
     var searching = false
     var searchTimedOut = false
@@ -56,12 +68,10 @@ object App {
     var incomingNumber: String? = null
     var dial = ""
 
-    // sms
-    var smsNumber = ""
-    var smsText = ""
-    var smsStatus: String? = null
-    var smsOk = false
-    var smsSending = false
+    // messaging
+    var draftText = ""
+    var messageStatus: String? = null
+    var sendingMessage = false
 
     private var pendingPin = ""
     private var reconnectKey: String? = null
@@ -144,13 +154,20 @@ object App {
                     syncStatus()
                 }
                 ConnectionManager.State.AUTH_FAILED -> {
-                    Prefs.clearClientPin(ctx())
-                    val locked = detail == "locked"
-                    EventLog.add(if (locked) "Pairing locked by gateway" else "Wrong PIN")
+                    val busy = detail == "gateway_busy"
+                    if (!busy) Prefs.clearClientPin(ctx())
+                    EventLog.add(
+                        when (detail) {
+                            "locked" -> "Pairing locked by gateway"
+                            "gateway_busy" -> "Gateway already has a connected phone"
+                            else -> "Wrong PIN"
+                        }
+                    )
                     val g = target
                     screen = Screen.SEARCH
                     discovery().start()
-                    if (g != null) pinPrompt = PinPrompt(g, friendly(if (locked) "locked" else "auth_failed"))
+                    if (g != null && !busy) pinPrompt = PinPrompt(g, friendly(detail ?: "auth_failed"))
+                    else if (g != null) searchError = friendly("gateway_busy")
                 }
                 ConnectionManager.State.DISCONNECTED -> {
                     if (prev == ConnectionManager.State.CONNECTED || prev == ConnectionManager.State.RECONNECTING) {
@@ -181,12 +198,25 @@ object App {
                 Proto.INCOMING_CALL -> {
                     if (incomingNumber == null) EventLog.add("Incoming call")
                     incomingNumber = message.optString("number", "")
-                    if (screen == Screen.CLIENT || screen == Screen.SMS) {
+                    if (screen != Screen.CALLING) {
+                        callReturnScreen = screen
                         callReturnTab = clientTab
                         screen = Screen.CALLING
                     }
                 }
                 Proto.CALL_STATE -> applyRemoteCall(message.optString("state"), message.optString("number"))
+                Proto.SMS_INCOMING -> {
+                    val number = message.optString("number", "")
+                    val text = message.optString("message", "")
+                    val time = message.optLong("time", System.currentTimeMillis())
+                    if (number.isNotEmpty() && text.isNotEmpty()) {
+                        Messages.addIncoming(ctx(), number, text, time)
+                        EventLog.add("Message received")
+                        if (!(screen == Screen.CONVERSATION && conversationNumber == number)) {
+                            showNotice("New message from ${ContactsStore.nameFor(number) ?: number}")
+                        }
+                    }
+                }
             }
             changed()
         }
@@ -375,10 +405,7 @@ object App {
         val r = Runnable {
             if (callUi == CallUi.ENDED) {
                 callUi = CallUi.READY
-                if (screen == Screen.CALLING) {
-                    screen = Screen.CLIENT
-                    clientTab = callReturnTab
-                }
+                if (screen == Screen.CALLING) returnFromCall()
                 changed()
             }
         }
@@ -405,11 +432,14 @@ object App {
     fun dismissCall() {
         callUi = CallUi.READY
         callMessage = null
-        if (screen == Screen.CALLING) {
-            screen = Screen.CLIENT
-            clientTab = callReturnTab
-        }
+        if (screen == Screen.CALLING) returnFromCall()
         changed()
+    }
+
+    /** Leaves the full-screen caller UI and restores wherever the call was placed from. */
+    private fun returnFromCall() {
+        screen = callReturnScreen
+        if (screen == Screen.CLIENT) clientTab = callReturnTab
     }
 
     /** Starts a call to the currently typed number. Used by the dial pad. */
@@ -433,7 +463,10 @@ object App {
         callUi = CallUi.DIALING
         callNumber = n
         callMessage = null
-        callReturnTab = clientTab
+        if (screen != Screen.CALLING) {
+            callReturnScreen = screen
+            callReturnTab = clientTab
+        }
         screen = Screen.CALLING
         changed()
         EventLog.add("Call request sent to ${EventLog.mask(n)}")
@@ -481,10 +514,7 @@ object App {
             if (r.ok) {
                 if (n.isNotEmpty()) CallHistory.add(ctx(), n, ContactsStore.nameFor(n), CallHistory.Type.MISSED)
                 incomingNumber = null
-                if (callUi == CallUi.READY && screen == Screen.CALLING) {
-                    screen = Screen.CLIENT
-                    clientTab = callReturnTab
-                }
+                if (callUi == CallUi.READY && screen == Screen.CALLING) returnFromCall()
                 changed()
             } else {
                 showNotice(friendly(r.error))
@@ -499,47 +529,51 @@ object App {
         changed()
     }
 
-    // ---- sms -------------------------------------------------------------------------------
+    // ---- messaging -------------------------------------------------------------------------
 
-    fun sendSms() {
-        if (connState != ConnectionManager.State.CONNECTED) {
-            smsOk = false
-            smsStatus = friendly("not_connected")
-            changed()
-            return
-        }
-        val n = Proto.cleanNumber(smsNumber)
-        if (n == null) {
-            smsOk = false
-            smsStatus = friendly("invalid_number")
-            changed()
-            return
-        }
-        val text = smsText.trim()
-        if (text.isEmpty()) {
-            smsOk = false
-            smsStatus = "Type a message first."
-            changed()
-            return
-        }
-        smsSending = true
-        smsStatus = null
+    /** Opens (or creates) a conversation thread with this number and switches to it. */
+    fun openConversation(number: String) {
+        conversationNumber = number
+        draftText = ""
+        messageStatus = null
+        Messages.markThreadRead(ctx(), number)
+        screen = Screen.CONVERSATION
         changed()
-        EventLog.add("SMS request sent to ${EventLog.mask(n)}")
+    }
+
+    fun sendMessage() {
+        if (connState != ConnectionManager.State.CONNECTED) {
+            messageStatus = friendly("not_connected")
+            changed()
+            return
+        }
+        val n = Proto.cleanNumber(conversationNumber)
+        if (n == null) {
+            messageStatus = friendly("invalid_number")
+            changed()
+            return
+        }
+        val text = draftText.trim()
+        if (text.isEmpty()) return
+        sendingMessage = true
+        messageStatus = null
+        changed()
         connection.request(Proto.SMS, mapOf("number" to n, "message" to text), 15000) { r ->
-            smsSending = false
+            sendingMessage = false
             if (r.ok) {
-                smsOk = true
-                smsStatus = "Handed to the gateway phone for sending."
-                smsText = ""
-                EventLog.add("SMS handed to gateway")
+                Messages.addOutgoing(ctx(), n, text)
+                draftText = ""
+                EventLog.add("Message handed to gateway")
             } else {
-                smsOk = false
-                smsStatus = friendly(r.error)
-                EventLog.add("SMS failed")
+                messageStatus = friendly(r.error)
+                EventLog.add("Message failed")
             }
             changed()
         }
+    }
+
+    fun deleteConversation(number: String) {
+        Messages.deleteThread(ctx(), number)
     }
 
     // ---- messages --------------------------------------------------------------------------
@@ -557,6 +591,7 @@ object App {
         "no_active_call" -> "There's no active call."
         "unsupported" -> "This Android version doesn't allow that action."
         "locked" -> "Too many wrong PINs. Try again in a minute."
+        "gateway_busy" -> "That gateway already has a phone connected. Try again once it's free."
         "auth_failed" -> "That PIN isn't right. Check the PIN shown on the SIM phone."
         else -> "Something went wrong on the gateway phone."
     }

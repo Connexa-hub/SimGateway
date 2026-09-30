@@ -14,11 +14,16 @@
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Needed by the provider phone for its own call handling, and by the client phone to show
+         the device's call log in Recents -->
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
-    <!-- Client phone only: shows the device's own contacts in the dialer, like a normal phone app -->
+    <!-- Client phone only: shows the device's own contacts and call log in the dialer, adds new
+         contacts, like a normal phone app -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
 
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
