@@ -216,7 +216,7 @@ class MainActivity : Activity() {
 
     // ---- rendering helpers -----------------------------------------------------------------
 
-    private fun render() {
+    internal fun render() {
         cancelAnimators()
         uptimeLabel = null
         callTimerLabel = null
