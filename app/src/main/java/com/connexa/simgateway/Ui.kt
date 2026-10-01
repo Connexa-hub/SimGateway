@@ -33,6 +33,16 @@ class Ui(private val ctx: Context) {
         return g
     }
 
+    /** Rounded only at the top (rounded-rect sheet sliding up from the bottom). */
+    fun roundedTop(fill: Int, radiusDp: Int): GradientDrawable {
+        val g = GradientDrawable()
+        g.shape = GradientDrawable.RECTANGLE
+        val r = dp(radiusDp).toFloat()
+        g.cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+        g.setColor(fill)
+        return g
+    }
+
     fun clickableBg(fill: Int, radiusDp: Int, stroke: Int? = null, strokeDp: Int = 1): Drawable {
         val content = rounded(fill, radiusDp, stroke, strokeDp)
         val mask = rounded(Color.WHITE, radiusDp)

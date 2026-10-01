@@ -44,6 +44,7 @@ class MainActivity : Activity() {
         const val REQ_PERMISSIONS = 100
         const val REQ_CONTACTS = 101
         const val REQ_CALL_LOG = 102
+        const val REQ_PICK_PHOTO = 103
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     }
@@ -53,6 +54,8 @@ class MainActivity : Activity() {
     internal lateinit var scroll: ScrollView
     internal lateinit var content: LinearLayout
     internal lateinit var fabSlot: FrameLayout
+    internal lateinit var dialSheetSlot: FrameLayout
+    internal lateinit var searchBarSlot: FrameLayout
 
     internal val handler = Handler(Looper.getMainLooper())
     internal val animators = mutableListOf<Animator>()
@@ -64,6 +67,7 @@ class MainActivity : Activity() {
     private var fixingPermissions = false
     internal var onboardingIndex = 0
     internal var contactsLoading = false
+    internal var dialSheetShown = false
 
     private val appObserver: () -> Unit = { render() }
     private val gatewayObserver: () -> Unit = {
@@ -133,15 +137,12 @@ class MainActivity : Activity() {
                 if (App.pickingRecipient) {
                     App.pickingRecipient = false
                     App.changed()
-                } else if (App.searchActive) {
-                    App.searchActive = false
-                    App.searchQuery = ""
-                    App.changed()
+                } else if (App.dialSheetOpen) {
+                    App.closeDialSheet()
                 } else {
                     super.onBackPressed()
                 }
             }
-            App.Screen.DIALPAD -> go(App.Screen.CLIENT)
             App.Screen.CALLING -> {
                 App.screen = App.callReturnScreen
                 if (App.screen == App.Screen.CLIENT) App.clientTab = App.callReturnTab
@@ -153,6 +154,7 @@ class MainActivity : Activity() {
             App.Screen.CONVERSATION -> go(App.Screen.MESSAGES)
             App.Screen.LOG -> go(App.logReturn)
             App.Screen.SETTINGS -> go(App.settingsReturn)
+            App.Screen.APP_SEARCH -> App.closeAppSearch()
         }
     }
 
@@ -189,6 +191,19 @@ class MainActivity : Activity() {
             }
         )
 
+        dialSheetSlot = FrameLayout(this)
+        root.addView(dialSheetSlot, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        searchBarSlot = FrameLayout(this)
+        root.addView(
+            searchBarSlot,
+            FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply {
+                leftMargin = ui.dp(20)
+                rightMargin = ui.dp(20)
+                bottomMargin = ui.dp(16)
+            }
+        )
+
         root.setOnApplyWindowInsetsListener { v, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
@@ -222,6 +237,7 @@ class MainActivity : Activity() {
         callTimerLabel = null
         content.removeAllViews()
         fabSlot.removeAllViews()
+        searchBarSlot.removeAllViews()
         when (App.screen) {
             App.Screen.ONBOARDING -> onboardingScreen()
             App.Screen.HOME -> homeScreen()
@@ -229,7 +245,6 @@ class MainActivity : Activity() {
             App.Screen.SEARCH -> searchScreen()
             App.Screen.CONNECTING -> connectingScreen()
             App.Screen.CLIENT -> clientScreen()
-            App.Screen.DIALPAD -> dialpadScreen()
             App.Screen.CALLING -> callingScreen()
             App.Screen.CONTACT_INFO -> contactInfoScreen()
             App.Screen.CONTACT_EDIT -> contactEditScreen()
@@ -237,7 +252,9 @@ class MainActivity : Activity() {
             App.Screen.CONVERSATION -> conversationScreen()
             App.Screen.LOG -> logScreen()
             App.Screen.SETTINGS -> settingsScreen()
+            App.Screen.APP_SEARCH -> appSearchScreen()
         }
+        renderDialSheet()
         maybeShowPinDialog()
     }
 
@@ -286,6 +303,45 @@ class MainActivity : Activity() {
         return f
     }
 
+    /** Decodes an image URI into a circular bitmap sized for an avatar, or null if it can't be read. */
+    internal fun circularBitmap(uri: android.net.Uri, sizeDp: Int): android.graphics.Bitmap? {
+        return try {
+            val input = contentResolver.openInputStream(uri) ?: return null
+            val raw = input.use { android.graphics.BitmapFactory.decodeStream(it) } ?: return null
+            val size = ui.dp(sizeDp)
+            val scaled = android.graphics.Bitmap.createScaledBitmap(raw, size, size, true)
+            val output = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(output)
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+            canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint)
+            paint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN)
+            canvas.drawBitmap(scaled, 0f, 0f, paint)
+            output
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Avatar that shows the contact's real photo (circularly cropped) when available, else initials. */
+    internal fun contactAvatar(name: String, photoUri: String?, sizeDp: Int): View {
+        if (photoUri != null) {
+            val bmp = circularBitmap(android.net.Uri.parse(photoUri), sizeDp)
+            if (bmp != null) {
+                val iv = android.widget.ImageView(this)
+                iv.setImageBitmap(bmp)
+                iv.layoutParams = LinearLayout.LayoutParams(ui.dp(sizeDp), ui.dp(sizeDp))
+                return iv
+            }
+        }
+        return avatarCircle(name, sizeDp)
+    }
+
+    /** Same as [contactAvatar], but looks the contact up by number first (for Recents/Messages rows). */
+    internal fun avatarForNumber(name: String, number: String, sizeDp: Int): View {
+        val contact = ContactsStore.findByNumber(number)
+        return contactAvatar(name, contact?.photoUri, sizeDp)
+    }
+
     private fun initialsFor(name: String): String {
         val parts = name.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         return when {
@@ -327,56 +383,40 @@ class MainActivity : Activity() {
     internal fun statusHeader(
         online: Boolean,
         showSearch: Boolean,
-        searchHint: String = "Search",
-        onSearchChanged: (String) -> Unit = {},
         menuItems: List<Pair<String, () -> Unit>>
     ) {
         val r = row()
         r.addView(ui.dot(if (online) R.color.sg_success else R.color.sg_text_dim, 10))
+        r.addView(
+            ui.text(if (online) "Online" else "Offline", 16f, bold = true),
+            LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(8) }
+        )
+        val spacer = View(this)
+        r.addView(spacer, LinearLayout.LayoutParams(0, 1, 1f))
 
-        if (showSearch && App.searchActive) {
-            val e = input(searchHint, App.searchQuery, InputType.TYPE_CLASS_TEXT, 1) {
-                App.searchQuery = it
-                onSearchChanged(it)
-                render()
-            }
-            e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            e.background = null
-            r.addView(e, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(10) })
-            e.requestFocus()
-            e.setSelection(e.text.length)
-        } else {
-            r.addView(
-                ui.text(if (online) "Online" else "Offline", 16f, bold = true),
-                LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(8) }
-            )
-            val spacer = View(this)
-            r.addView(spacer, LinearLayout.LayoutParams(0, 1, 1f))
-        }
+        val pill = row()
+        pill.setPadding(ui.dp(3), ui.dp(3), ui.dp(3), ui.dp(3))
+        pill.background = ui.rounded(ui.color(R.color.sg_surface_alt), 16)
 
         if (showSearch) {
             val search = FrameLayout(this)
             search.isClickable = true
             search.isFocusable = true
             search.contentDescription = "Search"
-            search.background = ui.clickableBg(Color.TRANSPARENT, 20)
+            search.background = ui.clickableBg(Color.TRANSPARENT, 13)
             search.addView(
-                ui.icon(if (App.searchActive) R.drawable.ic_arrow_back else R.drawable.ic_search, R.color.sg_text),
-                FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.CENTER)
+                ui.icon(R.drawable.ic_search, R.color.sg_text),
+                FrameLayout.LayoutParams(ui.dp(21), ui.dp(21), Gravity.CENTER)
             )
-            search.setOnClickListener {
-                App.searchActive = !App.searchActive
-                if (!App.searchActive) App.searchQuery = ""
-                App.changed()
-            }
-            r.addView(search, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
+            search.setOnClickListener { App.openAppSearch() }
+            pill.addView(search, LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)))
         }
 
         val overflow = FrameLayout(this)
         overflow.isClickable = true
         overflow.isFocusable = true
         overflow.contentDescription = "More options"
-        overflow.background = ui.clickableBg(Color.TRANSPARENT, 20)
+        overflow.background = ui.clickableBg(Color.TRANSPARENT, 13)
         overflow.addView(ui.icon(R.drawable.ic_more_vert, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER))
         overflow.setOnClickListener {
             val menu = android.widget.PopupMenu(this, overflow)
@@ -387,8 +427,9 @@ class MainActivity : Activity() {
             }
             menu.show()
         }
-        r.addView(overflow, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
+        pill.addView(overflow, LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)))
 
+        r.addView(pill, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = ui.dp(8) })
         content.add(r, top = 4)
     }
 
@@ -589,6 +630,18 @@ class MainActivity : Activity() {
             GatewayState.error = "Couldn't start the gateway service."
             EventLog.add("Gateway could not start: ${e.javaClass.simpleName}")
             go(App.Screen.PROVIDER)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PICK_PHOTO && resultCode == Activity.RESULT_OK) {
+            val uri = data?.data
+            if (uri != null) {
+                App.editingPhotoUri = uri
+                App.changed()
+            }
         }
     }
 

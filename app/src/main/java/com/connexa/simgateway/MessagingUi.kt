@@ -94,7 +94,7 @@ private fun MainActivity.threadRow(t: Messages.Thread): View {
     fg.background = ui.rounded(ui.color(R.color.sg_surface), 18, ui.color(R.color.sg_outline))
     fg.isClickable = true
     val label = t.name ?: t.number
-    fg.addView(avatarCircle(label, 48))
+    fg.addView(avatarForNumber(label, t.number, 48))
     val col = column()
     val nameRow = row()
     nameRow.addView(

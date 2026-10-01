@@ -6,9 +6,11 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -21,7 +23,8 @@ private const val WRAP = MainActivity.WRAP
 internal fun MainActivity.clientScreen() {
     val connected = App.connState == ConnectionManager.State.CONNECTED
     statusHeader(
-        online = connected, showSearch = true, searchHint = "Search ${if (App.clientTab == App.ClientTab.CONTACTS) "contacts" else "recents"}",
+        online = connected,
+        showSearch = true,
         menuItems = listOf(
             "Messages" to { go(App.Screen.MESSAGES) },
             "Settings" to {
@@ -59,6 +62,11 @@ internal fun MainActivity.clientScreen() {
 
     segmentedToggle()
 
+    content.add(
+        ui.text(if (App.clientTab == App.ClientTab.CONTACTS) "Contacts" else "Recents", 24f, bold = true),
+        top = 18
+    )
+
     when (App.clientTab) {
         App.ClientTab.RECENTS -> recentsTab()
         App.ClientTab.CONTACTS -> contactsTab()
@@ -66,15 +74,14 @@ internal fun MainActivity.clientScreen() {
 
     if (App.pickingRecipient) return
     when (App.clientTab) {
-        App.ClientTab.RECENTS -> setFab(R.drawable.ic_dialpad, "Open dialpad") { go(App.Screen.DIALPAD) }
+        App.ClientTab.RECENTS -> setFab(R.drawable.ic_dialpad, "Open dialpad") { App.toggleDialSheet() }
         App.ClientTab.CONTACTS -> setFab(R.drawable.ic_plus, "Add contact") {
-            App.editingContact = null
-            go(App.Screen.CONTACT_EDIT)
+            App.beginEditContact(null)
         }
     }
 }
 
-/** Top-left switch-style toggle between Recents and Contacts (Infinix XOS style). */
+/** Top-left switch-style toggle between Recents and Contacts (rounded-rectangle pill). */
 internal fun MainActivity.segmentedToggle() {
     val wrap = row()
     wrap.setPadding(ui.dp(3), ui.dp(3), ui.dp(3), ui.dp(3))
@@ -90,8 +97,6 @@ internal fun MainActivity.segmentedToggle() {
         item.addView(ui.text(tab.second, 14f, if (active) R.color.sg_primary else R.color.sg_text_dim, bold = active, center = true))
         item.setOnClickListener {
             App.clientTab = tab.first
-            App.searchActive = false
-            App.searchQuery = ""
             App.changed()
         }
         wrap.addWeighted(item)
@@ -134,10 +139,6 @@ internal fun MainActivity.recentsTab() {
 
     var entries = CallHistory.merged(this)
     if (App.recentsFilter == App.RecentsFilter.MISSED) entries = entries.filter { it.type == CallHistory.Type.MISSED }
-    if (App.searchActive && App.searchQuery.isNotBlank()) {
-        val q = App.searchQuery.trim().lowercase()
-        entries = entries.filter { (it.name ?: it.number).lowercase().contains(q) || it.number.contains(q) }
-    }
 
     if (entries.isEmpty()) {
         val c = ui.card(24)
@@ -191,7 +192,7 @@ private fun MainActivity.callLogRow(e: CallHistory.Entry): View {
     fg.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12))
     fg.background = ui.rounded(ui.color(R.color.sg_surface), 18, ui.color(R.color.sg_outline))
     val label = e.name ?: e.number
-    fg.addView(avatarCircle(label, 46))
+    fg.addView(avatarForNumber(label, e.number, 46))
     val col = column()
     col.addView(ui.text(label, 16f, bold = true))
     val typeRow = row()
@@ -300,18 +301,10 @@ internal fun MainActivity.contactsTab() {
         content.add(pb, top = 40, height = ui.dp(48))
         return
     }
-    var list = ContactsStore.cached()
+    val list = ContactsStore.cached()
     if (list.isEmpty()) {
         loadContacts()
         content.add(ui.text("Loading contacts\u2026", 14f, R.color.sg_text_dim, center = true), top = 30)
-        return
-    }
-    if (App.searchActive && App.searchQuery.isNotBlank()) {
-        val q = App.searchQuery.trim().lowercase()
-        list = list.filter { it.name.lowercase().contains(q) || it.number.contains(q) }
-    }
-    if (list.isEmpty()) {
-        content.add(ui.text("No contacts match your search.", 14f, R.color.sg_text_dim, center = true), top = 30)
         return
     }
     var lastLetter = ""
@@ -338,7 +331,7 @@ private fun MainActivity.contactRow(c: Contact): View {
             go(App.Screen.CONTACT_INFO)
         }
     }
-    val avatar = avatarCircle(c.name, 42)
+    val avatar = contactAvatar(c.name, c.photoUri, 42)
     avatar.isClickable = true
     avatar.contentDescription = "${c.name} details"
     avatar.setOnClickListener { onTap() }
@@ -363,36 +356,81 @@ private fun MainActivity.contactRow(c: Contact): View {
     return r
 }
 
-// ---- DIALPAD (standalone screen, opened from the Recents FAB) ------------------------------
+// ---- DIAL SHEET (rounded-circle FAB swipes this up over Recents; doesn't replace the screen) ---
 
-internal fun MainActivity.dialpadScreen() {
+internal fun MainActivity.renderDialSheet() {
+    dialSheetSlot.removeAllViews()
+    if (!App.dialSheetOpen) {
+        dialSheetShown = false
+        return
+    }
     val connected = App.connState == ConnectionManager.State.CONNECTED
-    header("Dial", null) { go(App.Screen.CLIENT) }
+
+    val scrim = FrameLayout(this)
+    scrim.setBackgroundColor(android.graphics.Color.argb(140, 0, 0, 0))
+    scrim.isClickable = true
+    scrim.setOnClickListener { App.closeDialSheet() }
+    dialSheetSlot.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+
+    val panel = column()
+    panel.setPadding(ui.dp(16), ui.dp(10), ui.dp(16), ui.dp(20))
+    panel.background = ui.roundedTop(ui.color(R.color.sg_surface), 24)
+
+    val handle = View(this)
+    handle.background = ui.rounded(ui.color(R.color.sg_outline), 3)
+    val handleLp = LinearLayout.LayoutParams(ui.dp(36), ui.dp(4))
+    handleLp.gravity = Gravity.CENTER_HORIZONTAL
+    panel.addView(handle, handleLp)
 
     val display = row()
-    display.setPadding(ui.dp(16), ui.dp(8), ui.dp(4), ui.dp(8))
-    display.background = ui.rounded(ui.color(R.color.sg_surface), 20, ui.color(R.color.sg_outline))
+    display.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4))
     val number = ui.text(
-        if (App.dial.isEmpty()) "Enter number" else App.dial, 28f,
+        if (App.dial.isEmpty()) "Enter number" else App.dial, 24f,
         if (App.dial.isEmpty()) R.color.sg_text_dim else R.color.sg_text, bold = true, center = true
     )
     number.maxLines = 1
     number.ellipsize = android.text.TextUtils.TruncateAt.START
-    number.contentDescription = if (App.dial.isEmpty()) "No number entered" else "Number ${App.dial}"
-    display.addView(number, LinearLayout.LayoutParams(0, ui.dp(54), 1f))
+    display.addView(number, LinearLayout.LayoutParams(0, ui.dp(48), 1f))
     val back = FrameLayout(this)
     back.isClickable = true
     back.isFocusable = true
     back.contentDescription = "Delete last digit"
     back.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 24)
-    back.addView(ui.icon(R.drawable.ic_backspace, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.CENTER))
+    back.addView(ui.icon(R.drawable.ic_backspace, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER))
     back.setOnClickListener { App.dialBackspace() }
     back.setOnLongClickListener {
         App.dialClear()
         true
     }
-    display.addView(back, LinearLayout.LayoutParams(ui.dp(46), ui.dp(46)))
-    content.add(display, top = 18)
+    display.addView(back, LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)))
+    panel.add(display, top = 10)
+
+    if (App.dial.isNotEmpty()) {
+        val digits = App.dial.filter { it.isDigit() }
+        val matches = (ContactsStore.cached().map { Triple(it.name, it.number, it.number) } +
+            CallHistory.merged(this).map { Triple(it.name ?: it.number, it.number, it.number) })
+            .distinctBy { it.second }
+            .filter { digits.isNotEmpty() && (it.second.filter { c -> c.isDigit() }.contains(digits) || it.first.contains(App.dial, ignoreCase = true)) }
+            .take(5)
+        if (matches.isNotEmpty()) {
+            val matchList = column()
+            for ((name, num, _) in matches) {
+                val row = row()
+                row.setPadding(ui.dp(6), ui.dp(8), ui.dp(6), ui.dp(8))
+                row.isClickable = true
+                row.addView(avatarForNumber(name, num, 34))
+                val col = column()
+                col.addView(ui.text(name, 14f, bold = true))
+                col.add(ui.text(num, 12f, R.color.sg_text_dim), top = 1)
+                row.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(10) })
+                row.setOnClickListener { App.placeCallTo(num) }
+                matchList.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+            }
+            val scrollWrap = ScrollView(this)
+            scrollWrap.addView(matchList, ViewGroup.LayoutParams(MATCH, WRAP))
+            panel.add(scrollWrap, top = 6, height = ui.dp(if (matches.size > 3) 220 else matches.size * 62))
+        }
+    }
 
     val grid = column()
     for (rowKeys in listOf("123", "456", "789", "*0#")) {
@@ -400,24 +438,37 @@ internal fun MainActivity.dialpadScreen() {
         for (ch in rowKeys) {
             r.addView(
                 keyView(ch),
-                LinearLayout.LayoutParams(0, ui.dp(60), 1f).apply { setMargins(ui.dp(5), ui.dp(5), ui.dp(5), ui.dp(5)) }
+                LinearLayout.LayoutParams(0, ui.dp(54), 1f).apply { setMargins(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4)) }
             )
         }
         grid.addView(r, LinearLayout.LayoutParams(MATCH, WRAP))
     }
-    content.add(grid, top = 10)
+    panel.add(grid, top = 8)
 
     val canCall = connected && Proto.cleanNumber(App.dial) != null
-    val callBtn = circleIcon(R.drawable.ic_call, 62, 26, ui.color(R.color.sg_call), R.color.sg_on_call)
+    val callBtn = circleIcon(R.drawable.ic_call, 56, 24, ui.color(R.color.sg_call), R.color.sg_on_call)
     callBtn.isClickable = canCall
     callBtn.alpha = if (canCall) 1f else 0.45f
     callBtn.contentDescription = "Call"
     if (canCall) callBtn.setOnClickListener { App.placeCall() }
     val callWrap = FrameLayout(this)
-    callWrap.addView(callBtn, FrameLayout.LayoutParams(ui.dp(62), ui.dp(62), Gravity.CENTER))
-    content.add(callWrap, top = 16, height = ui.dp(62))
+    callWrap.addView(callBtn, FrameLayout.LayoutParams(ui.dp(56), ui.dp(56), Gravity.CENTER))
+    panel.add(callWrap, top = 12, height = ui.dp(56))
     if (!connected) {
-        content.add(ui.text("Connect to a gateway to place a call.", 12f, R.color.sg_text_dim, center = true), top = 8)
+        panel.add(ui.text("Connect to a gateway to place a call.", 12f, R.color.sg_text_dim, center = true), top = 6)
+    }
+
+    dialSheetSlot.addView(panel, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+
+    if (!dialSheetShown) {
+        dialSheetShown = true
+        panel.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                panel.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                panel.translationY = panel.height.toFloat()
+                panel.animate().translationY(0f).setDuration(220).start()
+            }
+        })
     }
 }
 

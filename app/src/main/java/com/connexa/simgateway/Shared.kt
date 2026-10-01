@@ -89,6 +89,13 @@ object Prefs {
 
     fun onboardingDone(ctx: Context): Boolean = sp(ctx).getBoolean("onboarding_done", false)
     fun setOnboardingDone(ctx: Context) { sp(ctx).edit().putBoolean("onboarding_done", true).apply() }
+
+    fun recentSearches(ctx: Context): List<String> =
+        sp(ctx).getString("recent_searches", null)?.split("\u001f")?.filter { it.isNotBlank() } ?: emptyList()
+
+    fun setRecentSearches(ctx: Context, list: List<String>) {
+        sp(ctx).edit().putString("recent_searches", list.joinToString("\u001f")).apply()
+    }
 }
 
 /** "ready", "absent", "unknown" or "not_ready". Needs no permission. */

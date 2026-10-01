@@ -13,8 +13,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 object App {
 
     enum class Screen {
-        ONBOARDING, HOME, PROVIDER, SEARCH, CONNECTING, CLIENT, DIALPAD, CALLING,
-        CONTACT_INFO, CONTACT_EDIT, MESSAGES, CONVERSATION, LOG, SETTINGS
+        ONBOARDING, HOME, PROVIDER, SEARCH, CONNECTING, CLIENT, CALLING,
+        CONTACT_INFO, CONTACT_EDIT, MESSAGES, CONVERSATION, LOG, SETTINGS, APP_SEARCH
     }
     enum class ClientTab { RECENTS, CONTACTS }
     enum class RecentsFilter { ALL, MISSED }
@@ -38,12 +38,18 @@ object App {
     var recentsFilter = RecentsFilter.ALL
     var callReturnScreen = Screen.CLIENT
     var callReturnTab = ClientTab.RECENTS
-    var searchQuery = ""
-    var searchActive = false
-    var threadSearchQuery = ""
     var openContact: Contact? = null
+    var threadSearchQuery = ""
     var editingContact: Contact? = null
+    var editingPhotoUri: android.net.Uri? = null
+    var editDraftFirst = ""
+    var editDraftLast = ""
+    var editDraftNumber = ""
+    var editDraftType = android.provider.ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
     var pickingRecipient = false
+    var dialSheetOpen = false
+    var appSearchQuery = ""
+    var recentSearches: List<String> = emptyList()
     var conversationNumber = ""
     var gateways: List<Discovery.Gateway> = emptyList()
     var searching = false
@@ -95,6 +101,71 @@ object App {
             Prefs.appMode(ctx) == "client" -> Screen.CLIENT
             else -> Screen.HOME
         }
+        recentSearches = Prefs.recentSearches(ctx)
+    }
+
+    // ---- dialpad sheet (swipe-up over Recents, not a separate screen) ----------------------
+
+    fun toggleDialSheet() {
+        dialSheetOpen = !dialSheetOpen
+        if (!dialSheetOpen) dial = ""
+        changed()
+    }
+
+    fun closeDialSheet() {
+        if (dialSheetOpen) {
+            dialSheetOpen = false
+            dial = ""
+            changed()
+        }
+    }
+
+    // ---- app search (contacts / recents) ----------------------------------------------------
+
+    fun openAppSearch() {
+        appSearchQuery = ""
+        screen = Screen.APP_SEARCH
+        changed()
+    }
+
+    fun closeAppSearch() {
+        appSearchQuery = ""
+        screen = Screen.CLIENT
+        changed()
+    }
+
+    fun commitAppSearch(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) return
+        val updated = (listOf(q) + recentSearches.filter { it != q }).take(8)
+        recentSearches = updated
+        Prefs.setRecentSearches(ctx(), updated)
+    }
+
+    fun clearRecentSearches() {
+        recentSearches = emptyList()
+        Prefs.setRecentSearches(ctx(), emptyList())
+        changed()
+    }
+
+    /** Resets the in-progress edit form, called whenever CONTACT_EDIT is entered (add or edit). */
+    fun beginEditContact(c: Contact?) {
+        editingContact = c
+        editingPhotoUri = null
+        if (c != null) {
+            val parts = c.name.trim().split(Regex("\\s+"), limit = 2)
+            editDraftFirst = parts.getOrElse(0) { "" }
+            editDraftLast = parts.getOrElse(1) { "" }
+            editDraftNumber = c.number
+            editDraftType = c.numberType
+        } else {
+            editDraftFirst = ""
+            editDraftLast = ""
+            editDraftNumber = ""
+            editDraftType = android.provider.ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE
+        }
+        screen = Screen.CONTACT_EDIT
+        changed()
     }
 
     fun finishOnboarding() {

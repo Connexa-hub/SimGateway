@@ -3,6 +3,7 @@ package com.connexa.simgateway
 import android.Manifest
 import android.app.AlertDialog
 import android.content.Intent
+import android.provider.ContactsContract
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -38,10 +39,7 @@ internal fun MainActivity.contactInfoScreen() {
     edit.contentDescription = "Edit contact"
     edit.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 20)
     edit.addView(ui.icon(R.drawable.ic_edit, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(21), ui.dp(21), Gravity.CENTER))
-    edit.setOnClickListener {
-        App.editingContact = c
-        go(App.Screen.CONTACT_EDIT)
-    }
+    edit.setOnClickListener { App.beginEditContact(c) }
     top.addView(edit, LinearLayout.LayoutParams(ui.dp(44), ui.dp(44)))
     val overflow = FrameLayout(this)
     overflow.isClickable = true
@@ -62,7 +60,7 @@ internal fun MainActivity.contactInfoScreen() {
     content.add(top)
 
     val avatarWrap = FrameLayout(this)
-    avatarWrap.addView(avatarCircle(c.name, 100), FrameLayout.LayoutParams(ui.dp(100), ui.dp(100), Gravity.CENTER))
+    avatarWrap.addView(contactAvatar(c.name, c.photoUri, 100), FrameLayout.LayoutParams(ui.dp(100), ui.dp(100), Gravity.CENTER))
     content.add(avatarWrap, top = 12, height = ui.dp(100))
     content.add(ui.text(c.name, 22f, bold = true, center = true), top = 14)
     content.add(ui.text(c.number, 15f, R.color.sg_text_dim, center = true), top = 4)
@@ -123,15 +121,15 @@ private fun MainActivity.confirmDeleteContact(c: Contact) {
         .show()
 }
 
-// ---- CONTACT EDIT / ADD -----------------------------------------------------------------
+// ---- CONTACT EDIT / ADD (Google Contacts style) ------------------------------------------
 
 internal fun MainActivity.contactEditScreen() {
     val editing = App.editingContact
-    header(if (editing != null) "Edit contact" else "New contact", null) {
-        go(if (editing != null) App.Screen.CONTACT_INFO else App.Screen.CLIENT)
-    }
 
     if (!isGranted(Manifest.permission.WRITE_CONTACTS)) {
+        header(if (editing != null) "Edit contact" else "New contact", null) {
+            go(if (editing != null) App.Screen.CONTACT_INFO else App.Screen.CLIENT)
+        }
         val c = ui.card(20)
         c.addView(ui.text("Contacts access needed", 16f, bold = true))
         c.add(ui.text("Allow contacts access to add or edit contacts on this phone.", 13f, R.color.sg_text_dim), top = 4)
@@ -142,40 +140,142 @@ internal fun MainActivity.contactEditScreen() {
         return
     }
 
-    val nameField = input("Name", editing?.name ?: "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, 1) {}
-    content.add(ui.text("Name", 13f, R.color.sg_text_dim, bold = true), top = 16)
-    content.add(nameField, top = 6)
-
-    val numberField = input("Phone number", editing?.number ?: "", InputType.TYPE_CLASS_PHONE, 1) {}
-    content.add(ui.text("Phone number", 13f, R.color.sg_text_dim, bold = true), top = 14)
-    content.add(numberField, top = 6)
-
-    content.add(
-        ui.button(if (editing != null) "Save changes" else "Add contact", null, Ui.Kind.PRIMARY) {
-            val name = nameField.text.toString().trim()
-            val number = numberField.text.toString().trim()
-            if (name.isEmpty() || Proto.cleanNumber(number) == null) {
-                App.showNotice("Enter a name and a valid number.")
-                return@button
-            }
-            val ok = if (editing != null) {
-                ContactsStore.updateContact(this, editing.contactId, name, number)
-            } else {
-                ContactsStore.addContact(this, name, number)
-            }
-            if (ok) {
-                loadContacts()
-                App.editingContact = null
-                go(App.Screen.CLIENT)
-            } else {
-                App.showNotice("Couldn't save that contact.")
-            }
-        },
-        top = 20
+    // Top bar: X to cancel, checkmark to save -- matches the real Google Contacts edit screen.
+    val top = row()
+    val close = FrameLayout(this)
+    close.isClickable = true
+    close.isFocusable = true
+    close.contentDescription = "Cancel"
+    close.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 24)
+    close.addView(ui.icon(R.drawable.ic_arrow_back, R.color.sg_text), FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER))
+    close.setOnClickListener { go(if (editing != null) App.Screen.CONTACT_INFO else App.Screen.CLIENT) }
+    top.addView(close, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)))
+    top.addView(
+        ui.text(if (editing != null) "Edit contact" else "New contact", 18f, bold = true),
+        LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(4) }
     )
-    if (editing != null) {
-        content.add(ui.button("Cancel", null, Ui.Kind.SECONDARY) {
-            go(App.Screen.CONTACT_INFO)
-        }, top = 10)
+    val save = FrameLayout(this)
+    save.isClickable = true
+    save.isFocusable = true
+    save.contentDescription = "Save"
+    save.background = ui.clickableBg(android.graphics.Color.TRANSPARENT, 20)
+    save.addView(ui.icon(R.drawable.ic_check_circle, R.color.sg_primary), FrameLayout.LayoutParams(ui.dp(26), ui.dp(26), Gravity.CENTER))
+    save.setOnClickListener { saveContactDraft(editing) }
+    top.addView(save, LinearLayout.LayoutParams(ui.dp(44), ui.dp(44)))
+    content.add(top)
+
+    // Photo with camera badge
+    val avatarWrap = FrameLayout(this)
+    val preview = App.editingPhotoUri?.let { circularBitmap(it, 92) }
+    val avatarView: View = if (preview != null) {
+        val iv = android.widget.ImageView(this)
+        iv.setImageBitmap(preview)
+        iv
+    } else {
+        contactAvatar(
+            (App.editDraftFirst + " " + App.editDraftLast).trim().ifEmpty { "?" },
+            editing?.photoUri, 92
+        )
+    }
+    avatarView.isClickable = true
+    avatarView.contentDescription = "Change photo"
+    avatarView.setOnClickListener { pickContactPhoto() }
+    avatarWrap.addView(avatarView, FrameLayout.LayoutParams(ui.dp(92), ui.dp(92), Gravity.CENTER))
+    val badge = circleIcon(R.drawable.ic_camera, 30, 14, ui.color(R.color.sg_primary), R.color.sg_on_primary)
+    avatarWrap.addView(badge, FrameLayout.LayoutParams(ui.dp(30), ui.dp(30), Gravity.CENTER or Gravity.BOTTOM or Gravity.END).apply {
+        rightMargin = ui.dp(6)
+    })
+    content.add(avatarWrap, top = 16, height = ui.dp(92))
+
+    // Name row: person icon + first/last fields
+    val nameRow = row()
+    nameRow.addView(ui.icon(R.drawable.ic_person, R.color.sg_text_dim), LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)).apply { topMargin = ui.dp(14) })
+    val nameCol = column()
+    val firstField = input("First name", App.editDraftFirst, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, 1) {
+        App.editDraftFirst = it
+    }
+    firstField.background = null
+    nameCol.addView(firstField)
+    val firstDivider = View(this)
+    firstDivider.setBackgroundColor(ui.color(R.color.sg_outline))
+    nameCol.add(firstDivider, top = 2, height = 1)
+    val lastField = input("Last name", App.editDraftLast, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS, 1) {
+        App.editDraftLast = it
+    }
+    lastField.background = null
+    nameCol.add(lastField, top = 10)
+    val lastDivider = View(this)
+    lastDivider.setBackgroundColor(ui.color(R.color.sg_outline))
+    nameCol.add(lastDivider, top = 2, height = 1)
+    nameRow.addView(nameCol, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(16) })
+    content.add(nameRow, top = 24)
+
+    // Phone row: phone icon + number field + type chips
+    val phoneRow = row()
+    phoneRow.addView(ui.icon(R.drawable.ic_call, R.color.sg_text_dim), LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)).apply { topMargin = ui.dp(14) })
+    val phoneCol = column()
+    val numberField = input("Phone number", App.editDraftNumber, InputType.TYPE_CLASS_PHONE, 1) {
+        App.editDraftNumber = it
+    }
+    numberField.background = null
+    phoneCol.addView(numberField)
+    val phoneDivider = View(this)
+    phoneDivider.setBackgroundColor(ui.color(R.color.sg_outline))
+    phoneCol.add(phoneDivider, top = 2, height = 1)
+
+    val chips = row()
+    val types = listOf(
+        ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE to "Mobile",
+        ContactsContract.CommonDataKinds.Phone.TYPE_HOME to "Home",
+        ContactsContract.CommonDataKinds.Phone.TYPE_WORK to "Work"
+    )
+    for ((typeVal, label) in types) {
+        val active = App.editDraftType == typeVal
+        val chip = ui.text(label, 12f, if (active) R.color.sg_on_primary else R.color.sg_text_dim, bold = active, center = true)
+        chip.setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(6))
+        chip.background = if (active) ui.rounded(ui.color(R.color.sg_primary), 12) else ui.rounded(ui.color(R.color.sg_surface_alt), 12)
+        chip.isClickable = true
+        chip.setOnClickListener {
+            App.editDraftType = typeVal
+            render()
+        }
+        chips.addView(chip, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginEnd = ui.dp(8) })
+    }
+    phoneCol.add(chips, top = 10)
+    phoneRow.addView(phoneCol, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = ui.dp(16) })
+    content.add(phoneRow, top = 20)
+}
+
+private fun MainActivity.pickContactPhoto() {
+    val intent = Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+    try {
+        @Suppress("DEPRECATION")
+        startActivityForResult(intent, MainActivity.REQ_PICK_PHOTO)
+    } catch (e: Exception) {
+        App.showNotice("No photo picker app found on this phone.")
+    }
+}
+
+private fun MainActivity.saveContactDraft(editing: Contact?) {
+    val first = App.editDraftFirst.trim()
+    val last = App.editDraftLast.trim()
+    val number = App.editDraftNumber.trim()
+    if ((first.isEmpty() && last.isEmpty()) || Proto.cleanNumber(number) == null) {
+        App.showNotice("Enter a name and a valid number.")
+        return
+    }
+    val photoBytes = App.editingPhotoUri?.let { ContactsStore.readPhotoBytes(this, it) }
+    val ok = if (editing != null) {
+        ContactsStore.updateContact(this, editing.contactId, first, last, number, App.editDraftType, photoBytes)
+    } else {
+        ContactsStore.addContact(this, first, last, number, App.editDraftType, photoBytes)
+    }
+    if (ok) {
+        loadContacts()
+        App.editingContact = null
+        App.editingPhotoUri = null
+        go(App.Screen.CLIENT)
+    } else {
+        App.showNotice("Couldn't save that contact.")
     }
 }
